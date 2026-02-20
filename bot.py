@@ -18,6 +18,7 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 from telegram.constants import ParseMode
+import re
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & SETUP
@@ -118,6 +119,17 @@ def get_ad_to_show(current_index):
     
     ad_idx = current_index % len(ads)
     return ads[ad_idx]
+
+
+def escape_md(text):
+    """Escape characters that may break Telegram Markdown parsing for inserted DB text.
+
+    We only escape content coming from the database (question text, options,
+    explanations) while keeping the bot's own Markdown markers (like **..**) intact.
+    """
+    if not isinstance(text, str):
+        return text
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\\\1', text)
 
 # -----------------------------------------------------------------------------
 # 3. BOT HANDLERS
@@ -252,7 +264,6 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         return
 
     # --- AD LOGIC (Every 5 Qs, but not at 0) ---
-    # Show sponsor ads after every 5 questions (i.e., when q_index is 5,10,15,...)
     if q_index > 0 and q_index % 5 == 0:
         ad = get_ad_to_show(session.get('ad_break_counter', 0))
         if ad:
@@ -269,7 +280,7 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
                 if ad.get('message_link'):
                      await context.bot.send_message(chat_id=user_id, text=f"📢 **Sponsor**\n{ad['message_link']}")
                 
-                time.sleep(4) # Slight delay
+                time.sleep(2) # Slight delay
             except Exception as e:
                 logger.error(f"Ad error: {e}")
 
@@ -295,12 +306,18 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
 
     # Construct UI: Put full options in the message text, keep buttons short (A/B/C/D)
     opts = question_data['options']
+    q_text = escape_md(question_data['question_text'])
+    a_text = escape_md(opts.get('a', ''))
+    b_text = escape_md(opts.get('b', ''))
+    c_text = escape_md(opts.get('c', ''))
+    d_text = escape_md(opts.get('d', ''))
+
     text = (
-        f"**Question {q_num}/100**\n\n{question_data['question_text']}\n\n"
-        f"A. {opts['a']}\n"
-        f"B. {opts['b']}\n"
-        f"C. {opts['c']}\n"
-        f"D. {opts['d']}"
+        f"**Question {q_num}/100**\n\n{q_text}\n\n"
+        f"A. {a_text}\n"
+        f"B. {b_text}\n"
+        f"C. {c_text}\n"
+        f"D. {d_text}"
     )
 
     # Buttons: short labels only so long option text isn't truncated on small screens
@@ -387,20 +404,26 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     correct_ans_key = q_data['answer']
     correct_text = q_data['options'][correct_ans_key]
 
+    # Escape DB-provided texts for Markdown safety
+    esc_question_text = escape_md(q_data['question_text'])
+    esc_opts = {k: escape_md(v) for k, v in q_data['options'].items()}
+    esc_explanation = escape_md(explanation)
+    esc_correct_text = escape_md(correct_text)
+
     # Build the result block to append below the question and options (do not remove/modify the question)
     result_block = (
         f"{status_text}\n\n"
-        f"**Correct Answer:** {correct_ans_key.upper()}. {correct_text}\n"
-        f"**Explanation:** {explanation}"
+        f"**Correct Answer:** {correct_ans_key.upper()}. {esc_correct_text}\n"
+        f"**Explanation:** {esc_explanation}"
     )
 
     # Reconstruct original question+options text (same format as when sent)
     original_text = (
-        f"**Question {q_num}/100**\n\n{q_data['question_text']}\n\n"
-        f"A. {q_data['options']['a']}\n"
-        f"B. {q_data['options']['b']}\n"
-        f"C. {q_data['options']['c']}\n"
-        f"D. {q_data['options']['d']}"
+        f"**Question {q_num}/100**\n\n{esc_question_text}\n\n"
+        f"A. {esc_opts.get('a','')}\n"
+        f"B. {esc_opts.get('b','')}\n"
+        f"C. {esc_opts.get('c','')}\n"
+        f"D. {esc_opts.get('d','')}"
     )
 
     # Combine and replace the option buttons with navigation (so the four choice buttons are removed)
@@ -610,7 +633,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Add Deep Link
         deep_link = f"https://t.me/{context.bot.username}?start=dept_{dept_name}"
-        final_caption = f"{caption}\n\n👉 Start Exam: {deep_link}"
+        final_caption = f"{caption}\n\n👉 Start Quiz: {deep_link}"
         
         await context.bot.send_photo(
             chat_id=PUBLIC_CHANNEL_ID,
