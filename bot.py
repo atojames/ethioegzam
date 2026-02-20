@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import re
+import html
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & SETUP
@@ -130,6 +131,13 @@ def escape_md(text):
     if not isinstance(text, str):
         return text
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\\\1', text)
+
+
+def escape_html(text):
+    """HTML-escape DB/user-provided text before sending with ParseMode.HTML."""
+    if not isinstance(text, str):
+        return text
+    return html.escape(text)
 
 # -----------------------------------------------------------------------------
 # 3. BOT HANDLERS
@@ -306,14 +314,15 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
 
     # Construct UI: Put full options in the message text, keep buttons short (A/B/C/D)
     opts = question_data['options']
-    q_text = escape_md(question_data['question_text'])
-    a_text = escape_md(opts.get('a', ''))
-    b_text = escape_md(opts.get('b', ''))
-    c_text = escape_md(opts.get('c', ''))
-    d_text = escape_md(opts.get('d', ''))
+    # Use HTML-escaped DB content to avoid visible backslashes from Markdown escaping.
+    q_text = escape_html(question_data['question_text'])
+    a_text = escape_html(opts.get('a', ''))
+    b_text = escape_html(opts.get('b', ''))
+    c_text = escape_html(opts.get('c', ''))
+    d_text = escape_html(opts.get('d', ''))
 
     text = (
-        f"**Question {q_num}/100**\n\n{q_text}\n\n"
+        f"<b>Question {q_num}/100</b>\n\n{q_text}\n\n"
         f"A. {a_text}\n"
         f"B. {b_text}\n"
         f"C. {c_text}\n"
@@ -340,9 +349,9 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         # If previous message was an answer explanation, send new message
         # If simply flow, edit (but editing text with different height can be jumpy)
         # Spec says: "Edit message" for results. For new question, usually send new.
-        await update.callback_query.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        await update.callback_query.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -404,22 +413,22 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     correct_ans_key = q_data['answer']
     correct_text = q_data['options'][correct_ans_key]
 
-    # Escape DB-provided texts for Markdown safety
-    esc_question_text = escape_md(q_data['question_text'])
-    esc_opts = {k: escape_md(v) for k, v in q_data['options'].items()}
-    esc_explanation = escape_md(explanation)
-    esc_correct_text = escape_md(correct_text)
+    # HTML-escape DB-provided texts for safe HTML formatting
+    esc_question_text = escape_html(q_data['question_text'])
+    esc_opts = {k: escape_html(v) for k, v in q_data['options'].items()}
+    esc_explanation = escape_html(explanation)
+    esc_correct_text = escape_html(correct_text)
 
     # Build the result block to append below the question and options (do not remove/modify the question)
     result_block = (
         f"{status_text}\n\n"
-        f"**Correct Answer:** {correct_ans_key.upper()}. {esc_correct_text}\n"
-        f"**Explanation:** {esc_explanation}"
+        f"<b>Correct Answer:</b> {correct_ans_key.upper()}. {esc_correct_text}\n"
+        f"<b>Explanation:</b> {esc_explanation}"
     )
 
     # Reconstruct original question+options text (same format as when sent)
     original_text = (
-        f"**Question {q_num}/100**\n\n{esc_question_text}\n\n"
+        f"<b>Question {q_num}/100</b>\n\n{esc_question_text}\n\n"
         f"A. {esc_opts.get('a','')}\n"
         f"B. {esc_opts.get('b','')}\n"
         f"C. {esc_opts.get('c','')}\n"
@@ -431,7 +440,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nav_buttons = [[InlineKeyboardButton("Next ➡️", callback_data="next_question")]]
 
-    await query.edit_message_text(text=combined_text, reply_markup=InlineKeyboardMarkup(nav_buttons), parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(text=combined_text, reply_markup=InlineKeyboardMarkup(nav_buttons), parse_mode=ParseMode.HTML)
 
 async def next_question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -445,16 +454,16 @@ async def send_session_summary(update: Update, context: ContextTypes.DEFAULT_TYP
     acc = (correct / total * 100) if total > 0 else 0
     
     text = (
-        f"**{title}**\n\n"
+        f"<b>{title}</b>\n\n"
         f"Department: {session['department_id']}\n"
         f"Questions Attempted: {total}\n"
         f"Correct Answers: {correct}\n"
         f"Accuracy: {acc:.1f}%"
     )
     if update.callback_query:
-        await update.callback_query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # -----------------------------------------------------------------------------
 # 5. GENERAL CALLBACK ROUTER
