@@ -300,7 +300,14 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
                 if ad.get('type') == 'photo' and ad.get('file_id'):
                     await context.bot.send_photo(chat_id=user_id, photo=ad.get('file_id'), caption=ad.get('caption',''))
                 elif ad.get('type') == 'video' and ad.get('file_id'):
-                    await context.bot.send_video(chat_id=user_id, video=ad.get('file_id'), caption=ad.get('caption',''))
+                    try:
+                        await context.bot.send_video(chat_id=user_id, video=ad.get('file_id'), caption=ad.get('caption',''))
+                    except Exception:
+                        # Fallback: if original was uploaded as a document, try sending as document
+                        try:
+                            await context.bot.send_document(chat_id=user_id, document=ad.get('file_id'), caption=ad.get('caption',''))
+                        except Exception as e:
+                            logger.error(f"Failed to send video ad as video or document: {e}")
                 elif ad.get('type') == 'text' and ad.get('text'):
                     await context.bot.send_message(chat_id=user_id, text=ad.get('text'))
                 elif ad.get('message_link'):
@@ -717,6 +724,21 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['admin_state'] = None
             return
 
+        # Video sent as a document (some clients send videos as documents)
+        if update.message.document and getattr(update.message.document, 'mime_type', '').startswith('video'):
+            file_id = update.message.document.file_id
+            caption = update.message.caption or ''
+            db.collection('ads').add({
+                'type': 'video',
+                'file_id': file_id,
+                'caption': caption,
+                'order_index': int(time.time()),
+                'isActive': True
+            })
+            await update.message.reply_text("✅ Video ad saved (file_id stored).")
+            context.user_data['admin_state'] = None
+            return
+
         # Video
         if update.message.video:
             file_id = update.message.video.file_id
@@ -835,7 +857,8 @@ def main():
     # Admin Command
     application.add_handler(CommandHandler("ethioegzam", admin_panel))
     application.add_handler(CommandHandler("leaderboard", admin_leaderboard))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.TEXT, admin_message_handler))
+    # Include VIDEO filter so video messages trigger the admin handler
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.TEXT | filters.VIDEO, admin_message_handler))
 
     # Run Flask in separate thread
     flask_thread = threading.Thread(target=run_flask)
