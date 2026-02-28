@@ -223,10 +223,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             inviter_id = referrer
         if dept_unlocked and ref_dept:
+            # Prefer showing the human-friendly department name (displayName)
+            try:
+                dept_doc = db.collection('departments').document(str(ref_dept)).get()
+                if dept_doc.exists:
+                    dept_display = dept_doc.to_dict().get('displayName') or str(ref_dept)
+                else:
+                    dept_display = str(ref_dept)
+            except Exception:
+                dept_display = str(ref_dept)
+
             try:
                 await context.bot.send_message(
                     chat_id=inviter_id,
-                    text=f"🎉 **Congratulations!**\n\nYou have invited 2 users for *{ref_dept}*. That department is now unlocked for you!",
+                    text=f"🎉 **Congratulations!**\n\nYou have invited 2 users for *{dept_display}*. That department is now unlocked for you!",
                     parse_mode=ParseMode.MARKDOWN
                 )
             except:
