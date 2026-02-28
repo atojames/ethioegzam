@@ -20,6 +20,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 import re
 import html
+from urllib.parse import quote_plus, unquote_plus
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & SETUP
@@ -76,32 +77,60 @@ def get_user_data(user_id):
         return doc.to_dict()
     return None
 
-def create_user(user_id, referrer_id=None):
+def create_user(user_id, referrer_id=None, ref_dept=None):
+    """Create a user record and optionally record a referral for a specific department.
+
+    Returns a tuple: (created: bool, referral_recorded: bool, dept_unlocked: bool)
+    """
     now = datetime.utcnow()
+    user_doc_ref = db.collection('users').document(str(user_id))
     user_data = {
         'totalAttempts': 0,
         'totalCorrect': 0,
-        'referralCount': 0,
+        'referral_counts': {},    # dept_id -> int
+        'unlocked_departments': {}, # dept_id -> True
         'createdAt': now,
         'currentSession': None
     }
-    db.collection('users').document(str(user_id)).set(user_data)
-    
-    # Handle Referral
-    if referrer_id and str(referrer_id) != str(user_id):
+    user_doc_ref.set(user_data)
+
+    # Handle Referral (department-specific)
+    if referrer_id and str(referrer_id) != str(user_id) and ref_dept:
         # Record referral
-        ref_doc = db.collection('referrals').document()
-        ref_doc.set({
+        ref_record = db.collection('referrals').document()
+        ref_record.set({
             'inviter_id': str(referrer_id),
             'invited_id': str(user_id),
+            'dept_id': str(ref_dept),
             'timestamp': now
         })
-        # Increment inviter count
+
         inviter_ref = db.collection('users').document(str(referrer_id))
-        if inviter_ref.get().exists:
-            inviter_ref.update({'referralCount': firestore.Increment(1)})
-            return True # Indicates successful referral
-    return False
+        try:
+            # Increment inviter's count for that department
+            inviter_ref.update({f'referral_counts.{ref_dept}': firestore.Increment(1)})
+        except Exception:
+            # If inviter doc doesn't exist or field missing, create/init it
+            inviter_ref.set({
+                'referral_counts': {ref_dept: 1},
+                'unlocked_departments': {}
+            }, merge=True)
+
+        # Check if inviter reached threshold for this department
+        inviter_doc = inviter_ref.get().to_dict() if inviter_ref.get().exists else {}
+        dept_count = int(inviter_doc.get('referral_counts', {}).get(ref_dept, 0))
+        dept_unlocked = False
+        if dept_count >= 2:
+            # Unlock this department for inviter
+            try:
+                inviter_ref.update({f'unlocked_departments.{ref_dept}': True})
+            except Exception:
+                inviter_ref.set({'unlocked_departments': {ref_dept: True}}, merge=True)
+            dept_unlocked = True
+
+        return True, True, dept_unlocked
+
+    return True, False, False
 
 def get_ad_to_show(current_index):
     """Fetch next ad based on circular order."""
@@ -146,14 +175,26 @@ def escape_html(text):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
-    referrer = args[0].replace('ref_', '') if args and args[0].startswith('ref_') else None
+    referrer = None
+    ref_dept = None
+    dept_to_start = None
+
+    if args and args[0].startswith('ref_'):
+        # format: ref_<inviter>_<dept>  (dept may contain underscores; split once)
+        rest = args[0][4:]
+        parts = rest.split('_', 1)
+        referrer = parts[0]
+        ref_dept = unquote_plus(parts[1]) if len(parts) > 1 else None
+    elif args and args[0].startswith('dept_'):
+        dept_to_start = unquote_plus(args[0][5:])
 
     # 1. Create/Get User
     user_data = get_user_data(user.id)
-    referral_success = False
-    
+    referral_recorded = False
+    dept_unlocked = False
+
     if not user_data:
-        referral_success = create_user(user.id, referrer)
+        _, referral_recorded, dept_unlocked = create_user(user.id, referrer, ref_dept)
         user_data = get_user_data(user.id)
 
     # Keep basic user profile fields up-to-date
@@ -171,18 +212,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'username': user.username or ''
         }, merge=True)
 
-    # Notify inviter if referral succeeded and threshold reached
-    if referral_success:
-        inviter_data = get_user_data(referrer)
-        if inviter_data and inviter_data.get('referralCount', 0) == 2:
+    # Notify inviter if referral recorded and department got unlocked
+    if referral_recorded and referrer:
+        try:
+            inviter_id = int(referrer)
+        except Exception:
+            inviter_id = referrer
+        if dept_unlocked and ref_dept:
             try:
                 await context.bot.send_message(
-                    chat_id=referrer,
-                    text="🎉 **Congratulations!**\n\nYou have invited 2 users. The remaining 75 questions are now unlocked!",
+                    chat_id=inviter_id,
+                    text=f"🎉 **Congratulations!**\n\nYou have invited 2 users for *{ref_dept}*. That department is now unlocked for you!",
                     parse_mode=ParseMode.MARKDOWN
                 )
             except:
-                pass # Inviter might have blocked bot
+                pass
 
     # 2. Check Membership
     is_member = await check_membership(user.id, context.bot)
@@ -209,6 +253,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        return
+
+    # If start link specified a department, go directly to that department's quiz
+    if dept_to_start:
+        await start_quiz(update, context, dept_to_start)
         return
 
     await show_main_menu(update, context)
@@ -260,18 +309,23 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
     # --- CHECK REFERRAL LOCK (After Q25) ---
     if q_index == 25:
         user_doc = get_user_data(user_id)
-        if user_doc.get('referralCount', 0) < 2:
+        # If this department isn't unlocked for the user, require referrals specific to this dept
+        unlocked = False
+        if user_doc:
+            unlocked = bool(user_doc.get('unlocked_departments', {}).get(dept_id, False))
+        if not unlocked:
             # Send Summary first
             await send_session_summary(update, context, session, "🔒 Progress Locked")
-            
-            ref_link = f"https://t.me/{context.bot.username}?start=ref_{user_id}"
+            # Dept-specific referral link
+            ref_link = f"https://t.me/{context.bot.username}?start={quote_plus('ref_' + str(user_id) + '_' + str(dept_id))}"
             text = (
                 "🔒 **Content Locked**\n\n"
-                "You have completed the free 25 questions.\n"
-                "**Invite 2 friends** to unlock the remaining 75 questions!\n\n"
+                "You have completed the free 25 questions for this department.\n"
+                "**Invite 2 friends using your department referral link** to unlock the remaining 75 questions for this department!\n\n"
                 f"Your Referral Link:\n`{ref_link}`"
             )
-            keyboard = [[InlineKeyboardButton("Check Status & Continue", callback_data="check_lock")]]
+            cb_dept = quote_plus(dept_id)
+            keyboard = [[InlineKeyboardButton("Check Status & Continue", callback_data=f"check_lock_{cb_dept}")]]
             
             if update.callback_query:
                 await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -581,14 +635,41 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     
-    elif data == "check_lock":
-        # Re-check referral count
+    elif data.startswith("check_lock"):
+        # Re-check referral count for the specific department
+        # callback_data may be 'check_lock' or 'check_lock_<dept_enc>'
         user_data = get_user_data(user_id)
-        if user_data.get('referralCount', 0) >= 2:
-            await query.answer("Unlocked!", show_alert=True)
-            await next_question_handler(update, context)
+        dept = None
+        if data == "check_lock":
+            dept = None
         else:
-            await query.answer(f"Referrals: {user_data.get('referralCount',0)}/2. Invite more!", show_alert=True)
+            # parse dept after prefix
+            try:
+                dept_enc = data.replace("check_lock_", "", 1)
+                dept = unquote_plus(dept_enc)
+            except Exception:
+                dept = None
+
+        if dept:
+            unlocked = bool(user_data.get('unlocked_departments', {}).get(dept, False))
+            if unlocked:
+                await query.answer("Unlocked!", show_alert=True)
+                await next_question_handler(update, context)
+            else:
+                count = int(user_data.get('referral_counts', {}).get(dept, 0))
+                await query.answer(f"Referrals for {dept}: {count}/2. Invite more!", show_alert=True)
+        else:
+            # Fallback to global behavior if no dept provided
+            total_refs = 0
+            try:
+                total_refs = sum(int(v) for v in user_data.get('referral_counts', {}).values())
+            except Exception:
+                total_refs = 0
+            if total_refs >= 2:
+                await query.answer("Unlocked!", show_alert=True)
+                await next_question_handler(update, context)
+            else:
+                await query.answer(f"Total referrals: {total_refs}/2. Invite more!", show_alert=True)
 
     elif data == "resume_session":
         # Just call next_question logic, it pulls from state
