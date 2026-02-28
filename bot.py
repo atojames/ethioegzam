@@ -21,6 +21,7 @@ from telegram.constants import ParseMode
 import re
 import html
 from urllib.parse import quote_plus, unquote_plus
+from uuid import uuid4
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & SETUP
@@ -180,11 +181,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dept_to_start = None
 
     if args and args[0].startswith('ref_'):
-        # format: ref_<inviter>_<dept>  (dept may contain underscores; split once)
-        rest = args[0][4:]
-        parts = rest.split('_', 1)
-        referrer = parts[0]
-        ref_dept = unquote_plus(parts[1]) if len(parts) > 1 else None
+        # format expected: ref_<inviter>_dept_<deptCode>
+        rest = unquote_plus(args[0][4:])
+        if '_dept_' in rest:
+            inviter, dept_code = rest.split('_dept_', 1)
+            referrer = inviter
+            ref_dept = dept_code
+        else:
+            referrer = rest
     elif args and args[0].startswith('dept_'):
         dept_to_start = unquote_plus(args[0][5:])
 
@@ -270,7 +274,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for dep in deps_ref:
         d_data = dep.to_dict()
         if d_data.get('totalQuestions', 0) > 0:
-            keyboard.append([InlineKeyboardButton(dep.id, callback_data=f"dept_{dep.id}")])
+            # Show the human-friendly display name if available
+            label = d_data.get('displayName') or dep.id
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"dept_{dep.id}")])
     
     keyboard.append([InlineKeyboardButton("📊 My Score", callback_data="show_score")])
     
@@ -317,7 +323,9 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
             # Send Summary first
             await send_session_summary(update, context, session, "🔒 Progress Locked")
             # Dept-specific referral link
-            ref_link = f"https://t.me/{context.bot.username}?start={quote_plus('ref_' + str(user_id) + '_' + str(dept_id))}"
+            # build ref param as: ref_<inviter>_dept_<deptCode>
+            ref_param = f"ref_{user_id}_dept_{dept_id}"
+            ref_link = f"https://t.me/{context.bot.username}?start={quote_plus(ref_param)}"
             text = (
                 "🔒 **Content Locked**\n\n"
                 "You have completed the free 25 questions for this department.\n"
@@ -740,13 +748,16 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             questions = json.loads(byte_array.decode('utf-8'))
             dept_name = context.user_data['upload_dept']
-            
-            # Save to Firestore
-            dept_ref = db.collection('departments').document(dept_name)
+
+            # Generate a unique dept code (alphanumeric) and save displayName
+            dept_code = uuid4().hex[:8]
+            # Save to Firestore using dept_code as document id
+            dept_ref = db.collection('departments').document(dept_code)
             batch = db.batch()
-            
-            # Update Department Info
+
+            # Update Department Info (store displayName and code)
             dept_ref.set({
+                'displayName': dept_name,
                 'isActive': True,
                 'totalQuestions': len(questions)
             })
@@ -760,13 +771,15 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 # but for <500 items batch is fine. Using direct set for safety.
                 q_doc.set(q)
             
-            await update.message.reply_text(f"✅ Successfully uploaded {len(questions)} questions to {dept_name}.")
+            # remember both display name and code for posting
+            await update.message.reply_text(f"✅ Successfully uploaded {len(questions)} questions to {dept_name} (code: {dept_code}).")
             context.user_data['admin_state'] = None
             
             # Ask to post to channel
             await update.message.reply_text("Send a photo with caption to post this update to the public channel (or /cancel).")
             context.user_data['admin_state'] = 'awaiting_post'
             context.user_data['post_dept'] = dept_name
+            context.user_data['post_dept_id'] = dept_code
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error processing JSON: {e}")
@@ -774,10 +787,15 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     # 3. Post to Public Channel
     if state == 'awaiting_post' and update.message.photo:
         dept_name = context.user_data.get('post_dept')
+        dept_code = context.user_data.get('post_dept_id')
         caption = update.message.caption or f"New Quiz Available: {dept_name}"
-        
-        # Add Deep Link
-        deep_link = f"https://t.me/{context.bot.username}?start=dept_{dept_name}"
+
+        # Add Deep Link using department code: dept_<code>
+        if dept_code:
+            deep_link = f"https://t.me/{context.bot.username}?start=dept_{dept_code}"
+        else:
+            # Fallback to old behavior (dept name) if code missing
+            deep_link = f"https://t.me/{context.bot.username}?start=dept_{dept_name}"
         final_caption = f"{caption}\n\n👉 Start Quiz: {deep_link}"
         
         await context.bot.send_photo(
