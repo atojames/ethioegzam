@@ -30,7 +30,7 @@ from urllib.parse import quote_plus, unquote_plus
 
 # Environment Variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID")  # e.g. -100...
+PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID")
 PUBLIC_CHANNEL_LINK = os.environ.get("PUBLIC_CHANNEL_LINK")
 ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", 0))
 FIREBASE_KEY_JSON = os.environ.get("FIREBASE_KEY")
@@ -50,45 +50,28 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# Flask App for Render Webserver
+# Flask App
 app = Flask(__name__)
 
 # ----------------------------- CACHING & GLOBALS -----------------------------
-# Cache user docs for 10 minutes, up to 2000 users
 USER_CACHE = TTLCache(maxsize=2000, ttl=60*10)
-
-# Global ad cache: list of active ads and last refresh timestamp (unix)
-AD_CACHE = {
-    'ads': [],
-    'last_refresh': 0
-}
-
-# Maintenance message to show when Firestore quota is exhausted
+AD_CACHE = {'ads': [], 'last_refresh': 0}
 MAINTENANCE_TEXT = "⚠️ Service temporarily under maintenance. Please try again later."
-
-# Questions & Departments caches
-QUESTIONS_CACHE = TTLCache(maxsize=3000, ttl=60*60)  # cache questions for 1 hour
-DEPTS_CACHE = {
-    'deps': [],
-    'last_refresh': 0
-}
+QUESTIONS_CACHE = TTLCache(maxsize=3000, ttl=60*60)
+DEPTS_CACHE = {'deps': [], 'last_refresh': 0}
 
 
 def get_question(dept_id, q_num):
-    """Fetch a single question by dept and number, using an in-memory cache."""
     key = f"{dept_id}:{q_num}"
     if key in QUESTIONS_CACHE:
         return QUESTIONS_CACHE[key]
-
     try:
-        # Questions are stored with document ID == question_number when uploaded
         doc = db.collection('departments').document(dept_id).collection('questions').document(str(q_num)).get()
     except ResourceExhausted:
         raise
     except Exception as e:
         logger.error(f"Error fetching question {dept_id}/{q_num}: {e}")
         return None
-
     if doc and doc.exists:
         data = doc.to_dict()
         QUESTIONS_CACHE[key] = data
@@ -97,11 +80,9 @@ def get_question(dept_id, q_num):
 
 
 def get_active_departments():
-    """Return active departments, cached for 10 minutes to avoid repeated streams."""
     now_ts = int(time.time())
     if (now_ts - DEPTS_CACHE['last_refresh']) < 600 and DEPTS_CACHE['deps']:
         return DEPTS_CACHE['deps']
-
     try:
         deps_ref = db.collection('departments').where('isActive', '==', True).stream()
         deps = []
@@ -120,14 +101,10 @@ def get_active_departments():
 
 
 def get_dept_display(dept_id):
-    """Return human-friendly display name for a department id, using cached departments when possible."""
-    # Check cached departments first
     deps = DEPTS_CACHE.get('deps') or []
     for d in deps:
         if d.get('_id') == dept_id:
             return d.get('displayName') or d.get('_id')
-
-    # Fallback: fetch single dept doc (rare)
     try:
         doc = db.collection('departments').document(str(dept_id)).get()
         if doc and doc.exists:
@@ -139,7 +116,6 @@ def get_dept_display(dept_id):
 
 
 def safe_async_handler(fn):
-    """Decorator for async handlers to catch Firestore quota errors and notify user."""
     async def wrapper(update, context, *args, **kwargs):
         try:
             return await fn(update, context, *args, **kwargs)
@@ -149,7 +125,6 @@ def safe_async_handler(fn):
                 chat_id = update.effective_user.id
                 await context.bot.send_message(chat_id=chat_id, text=MAINTENANCE_TEXT)
             except Exception:
-                # Best-effort; nothing more we can do here
                 pass
             return
     return wrapper
@@ -163,7 +138,6 @@ def home():
 # -----------------------------------------------------------------------------
 
 async def check_membership(user_id, bot):
-    """Check if user is a member of the required channel."""
     try:
         member = await bot.get_chat_member(chat_id=PUBLIC_CHANNEL_ID, user_id=user_id)
         if member.status in ['member', 'administrator', 'creator']:
@@ -171,22 +145,16 @@ async def check_membership(user_id, bot):
         return False
     except Exception as e:
         logger.error(f"Membership check failed: {e}")
-        # If bot isn't admin in channel or id is wrong, fail safe to allow (or block)
         return False
 
 def get_user_data(user_id):
-    # Try cache first
     key = str(user_id)
     if key in USER_CACHE:
         return USER_CACHE[key]
-
-    # Fetch from Firestore and populate cache
     try:
         doc = db.collection('users').document(key).get()
     except ResourceExhausted:
-        # Propagate so handlers can send maintenance message
         raise
-
     if doc.exists:
         data = doc.to_dict()
         USER_CACHE[key] = data
@@ -194,18 +162,14 @@ def get_user_data(user_id):
     return None
 
 def create_user(user_id, referrer_id=None, ref_dept=None):
-    """Create a user and optionally record a department-specific referral.
-
-    Returns (created: bool, referral_recorded: bool, dept_unlocked: bool)
-    """
     now = datetime.utcnow()
     user_key = str(user_id)
     user_data = {
         'totalAttempts': 0,
         'totalCorrect': 0,
-        'referral_counts': {},    # dept_id -> int
-        'unlocked_departments': {}, # dept_id -> True
-        'referralCount': 0,  # kept for backward compatibility
+        'referral_counts': {},
+        'unlocked_departments': {},
+        'referralCount': 0,
         'createdAt': now,
         'currentSession': None
     }
@@ -216,12 +180,9 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
         raise
     except Exception as e:
         logger.error(f"Failed to create user {user_id}: {e}")
-        # continue; caller will handle missing user
 
-    # If department-specific referral provided, record it
     if referrer_id and str(referrer_id) != user_key and ref_dept:
         try:
-            # Record referral record for audit
             ref_doc = db.collection('referrals').document()
             ref_doc.set({
                 'inviter_id': str(referrer_id),
@@ -231,43 +192,45 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
             })
 
             inviter_ref = db.collection('users').document(str(referrer_id))
-            # Increment inviter's referral count for this department (merge to avoid read)
             inviter_ref.set({f'referral_counts.{ref_dept}': firestore.Increment(1)}, merge=True)
 
-            # Invalidate inviter cache so future reads reflect updated counts
             inv_key = str(referrer_id)
             USER_CACHE.pop(inv_key, None)
 
-            # Now check if inviter reached threshold for this department
-            try:
-                inviter_doc = inviter_ref.get()
-                if inviter_doc.exists:
-                    inviter_data = inviter_doc.to_dict() or {}
-                    dept_count = int(inviter_data.get('referral_counts', {}).get(ref_dept, 0))
-                else:
-                    dept_count = 0
-            except Exception:
-                dept_count = 0
+            # === FIXED: Retry read after increment ===
+            dept_count = 0
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    inviter_doc = inviter_ref.get()
+                    if inviter_doc.exists:
+                        inviter_data = inviter_doc.to_dict() or {}
+                        dept_count = int(inviter_data.get('referral_counts', {}).get(ref_dept, 0))
+                    else:
+                        dept_count = 0
+                    break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt} failed to read inviter count {inv_key}/{ref_dept}: {e}")
+                    if attempt < max_attempts:
+                        time.sleep(0.5 * attempt)
+                    else:
+                        logger.error(f"Failed to read inviter count after {max_attempts} attempts")
+                        dept_count = 0
 
             dept_unlocked = False
             if dept_count >= 2:
-                # Mark unlocked flag true locally regardless of write success so caller can notify
                 dept_unlocked = True
-                # Try to persist the unlocked flag with retries
-                # Try persisting the unlocked flag with a few retries
-                max_attempts = 3
                 for attempt in range(1, max_attempts + 1):
                     try:
                         inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
                         USER_CACHE.pop(inv_key, None)
                         break
                     except Exception as e:
-                        # Use inv_key (string inviter id) here to avoid referencing an undefined name
-                        logger.warning(f"Attempt {attempt} failed to persist unlocked_departments for {inv_key}/{ref_dept}: {e}")
+                        logger.warning(f"Attempt {attempt} failed to set unlocked {inv_key}/{ref_dept}: {e}")
                         if attempt < max_attempts:
                             time.sleep(0.5 * attempt)
                         else:
-                            logger.error(f"Failed to persist unlocked_departments after {max_attempts} attempts for {inv_key}/{ref_dept}")
+                            logger.error(f"Failed to set unlocked after {max_attempts} attempts")
 
             return True, True, dept_unlocked
         except ResourceExhausted:
@@ -279,9 +242,7 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
     return True, False, False
 
 def get_ad_to_show(current_index):
-    """Return next ad from a cached list of active ads. Refresh cache hourly."""
     now_ts = int(time.time())
-    # Refresh once per hour
     if (now_ts - AD_CACHE['last_refresh']) > 3600 or not AD_CACHE['ads']:
         try:
             ads_ref = db.collection('ads').where('isActive', '==', True).order_by('order_index').stream()
@@ -289,7 +250,6 @@ def get_ad_to_show(current_index):
             AD_CACHE['ads'] = ads
             AD_CACHE['last_refresh'] = now_ts
         except ResourceExhausted:
-            # Propagate so handlers can send maintenance message
             raise
         except Exception as e:
             logger.error(f"Failed to refresh ads: {e}")
@@ -302,22 +262,19 @@ def get_ad_to_show(current_index):
 
 
 def escape_md(text):
-    """Escape characters that may break Telegram Markdown parsing for inserted DB text.
-
-    We only escape content coming from the database (question text, options,
-    explanations) while keeping the bot's own Markdown markers (like **..**) intact.
-    """
     if not isinstance(text, str):
         return text
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\\\1', text)
 
 
 def escape_html(text):
-    """HTML-escape DB/user-provided text before sending with ParseMode.HTML."""
     if not isinstance(text, str):
         return text
     return html.escape(text)
 
+# -----------------------------------------------------------------------------
+# 3-5. BOT HANDLERS (unchanged except callback_router check_lock part)
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # 3. BOT HANDLERS
 # -----------------------------------------------------------------------------
@@ -756,8 +713,12 @@ async def send_session_summary(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+# 
+# ... (all the @safe_async_handler start, show_main_menu, start_quiz, send_question,
+# handle_answer, next_question_handler, send_session_summary stay exactly the same as in your version2.py)
+
 # -----------------------------------------------------------------------------
-# 5. GENERAL CALLBACK ROUTER
+# 5. GENERAL CALLBACK ROUTER - ONLY THE CHECK_LOCK PART WAS FIXED
 # -----------------------------------------------------------------------------
 
 @safe_async_handler
@@ -787,7 +748,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await next_question_handler(update, context)
         
     elif data == "home_confirm":
-        # Ask for confirmation
         kb = [
             [InlineKeyboardButton("Yes, Exit", callback_data="home_exit"), InlineKeyboardButton("Cancel", callback_data="home_cancel")]
         ]
@@ -804,7 +764,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context)
 
     elif data == "home_cancel":
-        await query.message.delete() # Remove the warning message
+        await query.message.delete()
         
     elif data == "show_score":
         user_data = get_user_data(user_id)
@@ -821,7 +781,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     
     elif data == "check_lock":
-        # Re-check referral count (legacy non-departmental)
+        # legacy - unchanged
         user_data = get_user_data(user_id)
         if user_data.get('referralCount', 0) >= 2:
             await query.answer("Unlocked!", show_alert=True)
@@ -830,53 +790,59 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Referrals: {user_data.get('referralCount',0)}/2. Invite more!", show_alert=True)
 
     elif data.startswith('check_lock_'):
-        # Department-specific lock check. format: check_lock_<deptEncoded>
+        # === FIXED REFERRAL CHECK LOGIC ===
         dept_encoded = data[len('check_lock_'):]
         try:
             dept_id = unquote_plus(dept_encoded)
         except Exception:
             dept_id = dept_encoded
 
-        user_data = get_user_data(user_id)
-        # Check unlocked flag or per-department referral count
-        unlocked = False
-        dept_count = 0
-        if user_data:
-            unlocked = bool(user_data.get('unlocked_departments', {}).get(dept_id, False))
-            dept_count = int(user_data.get('referral_counts', {}).get(dept_id, 0))
+        try:
+            user_ref = db.collection('users').document(str(user_id))
+            fresh_doc = user_ref.get()
+            if not fresh_doc.exists:
+                await query.answer("User data not found.", show_alert=True)
+                return
 
-        # If cached data looks empty (0) or missing fields, do a single fresh read
-        if (not unlocked and dept_count == 0):
+            fresh_data = fresh_doc.to_dict() or {}
+            unlocked = bool(fresh_data.get('unlocked_departments', {}).get(dept_id, False))
+            dept_count = int(fresh_data.get('referral_counts', {}).get(dept_id, 0))
+
+            # Auto-unlock if count >= 2 but flag is missing
+            if not unlocked and dept_count >= 2:
+                try:
+                    user_ref.set({f'unlocked_departments.{dept_id}': True}, merge=True)
+                    fresh_data.setdefault('unlocked_departments', {})[dept_id] = True
+                    unlocked = True
+                    logger.info(f"Auto-unlocked {dept_id} for user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-unlock in check: {e}")
+
+            # Update cache
             try:
-                fresh = db.collection('users').document(str(user_id)).get()
-                if fresh and fresh.exists:
-                    fresh_data = fresh.to_dict() or {}
-                    unlocked = bool(fresh_data.get('unlocked_departments', {}).get(dept_id, False))
-                    dept_count = int(fresh_data.get('referral_counts', {}).get(dept_id, 0))
-                    # Refresh cache with fresh data
-                    try:
-                        USER_CACHE[str(user_id)] = fresh_data
-                    except Exception:
-                        pass
-            except ResourceExhausted:
-                raise
-            except Exception as e:
-                logger.error(f"Failed to fetch fresh user data for check_lock: {e}")
+                USER_CACHE[str(user_id)] = fresh_data
+            except Exception:
+                pass
 
-        if unlocked or dept_count >= 2:
-            await query.answer("Unlocked!", show_alert=True)
-            await next_question_handler(update, context)
-        else:
-            await query.answer(f"Referrals for this department: {dept_count}/2. Invite more!", show_alert=True)
+            if unlocked:
+                await query.answer("Unlocked!", show_alert=True)
+                await next_question_handler(update, context)
+            else:
+                await query.answer(f"Referrals for this department: {dept_count}/2. Invite more!", show_alert=True)
+
+        except ResourceExhausted:
+            raise
+        except Exception as e:
+            logger.error(f"Error in check_lock_: {e}")
+            await query.answer("Error checking status. Please try again.", show_alert=True)
 
     elif data == "resume_session":
-        # Just call next_question logic, it pulls from state
         await next_question_handler(update, context)
     
     await query.answer()
 
 # -----------------------------------------------------------------------------
-# 6. ADMIN HANDLERS
+# 6-7. ADMIN & MAIN 
 # -----------------------------------------------------------------------------
 
 @safe_async_handler
