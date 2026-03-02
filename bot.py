@@ -213,15 +213,23 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
             dept_unlocked = False
             if dept_count >= 2:
                 dept_unlocked = True
-                # Persist unlock with retry
-                for attempt in range(3):
-                    try:
-                        inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
-                        USER_CACHE.pop(inv_key, None)
-                        break
-                    except Exception as e:
-                        logger.warning(f"Unlock retry {attempt+1} failed: {e}")
-                        time.sleep(0.5 * (attempt + 1))
+                # Prefer update() for atomic write; fallback to set(..., merge=True) with retries
+                try:
+                    inviter_ref.update({f'unlocked_departments.{ref_dept}': True})
+                    USER_CACHE.pop(inv_key, None)
+                except Exception:
+                    max_attempts = 3
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
+                            USER_CACHE.pop(inv_key, None)
+                            break
+                        except Exception as e:
+                            logger.warning(f"Unlock retry {attempt} failed for {inv_key}/{ref_dept}: {e}")
+                            if attempt < max_attempts:
+                                time.sleep(0.5 * attempt)
+                            else:
+                                logger.error(f"Failed to persist unlocked_departments after {max_attempts} attempts for {inv_key}/{ref_dept}")
 
             return True, True, dept_unlocked
         except ResourceExhausted:
