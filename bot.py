@@ -201,13 +201,19 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
             inviter_ref = db.collection('users').document(str(referrer_id))
             inv_key = str(referrer_id)
 
-            # Increment referral count
+            # Increment referral count (atomic server-side increment)
             inviter_ref.set({f'referral_counts.{ref_dept}': firestore.Increment(1)}, merge=True)
+            # Wipe inviter cache so subsequent reads are fresh
             USER_CACHE.pop(inv_key, None)
 
-            # Get fresh count
-            inviter_doc = inviter_ref.get()
-            inviter_data = inviter_doc.to_dict() or {} if inviter_doc.exists else {}
+            # Fetch fresh inviter data from Firestore (force refresh) to get the accurate count
+            try:
+                inviter_data = get_user_data(inv_key, force_refresh=True) or {}
+            except ResourceExhausted:
+                raise
+            except Exception:
+                inviter_data = {}
+
             dept_count = int(inviter_data.get('referral_counts', {}).get(ref_dept, 0))
 
             dept_unlocked = False
@@ -736,13 +742,24 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             dept_id = dept_encoded
 
-        # ALWAYS fresh read for referral status
-        fresh_doc = db.collection('users').document(str(user_id)).get()
-        user_data = fresh_doc.to_dict() or {} if fresh_doc.exists else {}
-        USER_CACHE[str(user_id)] = user_data  # sync cache
+        # Get authoritative user profile (force refresh) so lock status is up-to-date
+        try:
+            user_data = get_user_data(user_id, force_refresh=True) or {}
+        except ResourceExhausted:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch fresh user data for check_lock: {e}")
+            user_data = USER_CACHE.get(str(user_id), {})
 
         unlocked = bool(user_data.get('unlocked_departments', {}).get(dept_id, False))
+        # Support both new `referral_counts` map and legacy/alternate `referrals.{dept}.count`
         dept_count = int(user_data.get('referral_counts', {}).get(dept_id, 0))
+        try:
+            alt_count = int(user_data.get('referrals', {}).get(dept_id, {}).get('count', 0))
+        except Exception:
+            alt_count = 0
+        if alt_count > dept_count:
+            dept_count = alt_count
 
         if unlocked or dept_count >= 2:
             # Ensure flag is set
