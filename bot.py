@@ -676,12 +676,50 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "next_question":
         await next_question_handler(update, context)
 
-    elif data.startswith("home_"):
-        # ... your existing home logic ...
+    elif data == "home_confirm":
+        # Ask for confirmation
+        kb = [
+            [InlineKeyboardButton("Yes, Exit", callback_data="home_exit"), InlineKeyboardButton("Cancel", callback_data="home_cancel")]
+        ]
+        await query.message.reply_text(
+            "⚠️ **Exit Session?**\n\nYour progress will be saved.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.MARKDOWN
+        )
 
+    elif data == "home_exit":
+        user_data = get_user_data(user_id)
+        if user_data and user_data.get('currentSession'):
+            await send_session_summary(update, context, user_data['currentSession'], "Paused Session")
+        await show_main_menu(update, context)
+
+    elif data == "home_cancel":
+        await query.message.delete() # Remove the warning message
+        
     elif data == "show_score":
-        # ... your existing score logic ...
+        user_data = get_user_data(user_id)
+        attempts = user_data.get('totalAttempts', 0)
+        correct = user_data.get('totalCorrect', 0)
+        acc = (correct / attempts * 100) if attempts > 0 else 0
+        text = (
+            "📊 **Your Overall Performance**\n\n"
+            f"Total Attempts: {attempts}\n"
+            f"Total Correct: {correct}\n"
+            f"Overall Accuracy: {acc:.1f}%"
+        )
+        kb = [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    
+    elif data == "check_lock":
+        # Re-check referral count (legacy non-departmental)
+        user_data = get_user_data(user_id)
+        if user_data.get('referralCount', 0) >= 2:
+            await query.answer("Unlocked!", show_alert=True)
+            await next_question_handler(update, context)
+        else:
+            await query.answer(f"Referrals: {user_data.get('referralCount',0)}/2. Invite more!", show_alert=True)
 
+            
     elif data.startswith('check_lock_'):
         # FIXED - always fresh read
         dept_encoded = data[len('check_lock_'):]
