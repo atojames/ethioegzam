@@ -251,14 +251,22 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
 
             dept_unlocked = False
             if dept_count >= 2:
-                # Unlock this department for inviter
-                try:
-                    inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
-                    dept_unlocked = True
-                    # Invalidate cache to reflect unlock
-                    USER_CACHE.pop(inv_key, None)
-                except Exception:
-                    pass
+                # Mark unlocked flag true locally regardless of write success so caller can notify
+                dept_unlocked = True
+                # Try to persist the unlocked flag with retries
+                # Try persisting the unlocked flag with a few retries
+                max_attempts = 3
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
+                        USER_CACHE.pop(inv_key, None)
+                        break
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt} failed to persist unlocked_departments for {referrer}/{ref_dept}: {e}")
+                        if attempt < max_attempts:
+                            time.sleep(0.5 * attempt)
+                        else:
+                            logger.error(f"Failed to persist unlocked_departments after {max_attempts} attempts for {referrer}/{ref_dept}")
 
             return True, True, dept_unlocked
         except ResourceExhausted:
@@ -831,11 +839,28 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data = get_user_data(user_id)
         # Check unlocked flag or per-department referral count
         unlocked = False
+        dept_count = 0
         if user_data:
             unlocked = bool(user_data.get('unlocked_departments', {}).get(dept_id, False))
             dept_count = int(user_data.get('referral_counts', {}).get(dept_id, 0))
-        else:
-            dept_count = 0
+
+        # If cached data looks empty (0) or missing fields, do a single fresh read
+        if (not unlocked and dept_count == 0):
+            try:
+                fresh = db.collection('users').document(str(user_id)).get()
+                if fresh and fresh.exists:
+                    fresh_data = fresh.to_dict() or {}
+                    unlocked = bool(fresh_data.get('unlocked_departments', {}).get(dept_id, False))
+                    dept_count = int(fresh_data.get('referral_counts', {}).get(dept_id, 0))
+                    # Refresh cache with fresh data
+                    try:
+                        USER_CACHE[str(user_id)] = fresh_data
+                    except Exception:
+                        pass
+            except ResourceExhausted:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to fetch fresh user data for check_lock: {e}")
 
         if unlocked or dept_count >= 2:
             await query.answer("Unlocked!", show_alert=True)
