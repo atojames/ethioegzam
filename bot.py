@@ -22,6 +22,7 @@ import re
 import html
 from cachetools import TTLCache
 from google.api_core.exceptions import ResourceExhausted
+from urllib.parse import quote_plus, unquote_plus
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & SETUP
@@ -118,6 +119,25 @@ def get_active_departments():
         return []
 
 
+def get_dept_display(dept_id):
+    """Return human-friendly display name for a department id, using cached departments when possible."""
+    # Check cached departments first
+    deps = DEPTS_CACHE.get('deps') or []
+    for d in deps:
+        if d.get('_id') == dept_id:
+            return d.get('displayName') or d.get('_id')
+
+    # Fallback: fetch single dept doc (rare)
+    try:
+        doc = db.collection('departments').document(str(dept_id)).get()
+        if doc and doc.exists:
+            dd = doc.to_dict() or {}
+            return dd.get('displayName') or str(dept_id)
+    except Exception:
+        pass
+    return str(dept_id)
+
+
 def safe_async_handler(fn):
     """Decorator for async handlers to catch Firestore quota errors and notify user."""
     async def wrapper(update, context, *args, **kwargs):
@@ -173,51 +193,81 @@ def get_user_data(user_id):
         return data
     return None
 
-def create_user(user_id, referrer_id=None):
+def create_user(user_id, referrer_id=None, ref_dept=None):
+    """Create a user and optionally record a department-specific referral.
+
+    Returns (created: bool, referral_recorded: bool, dept_unlocked: bool)
+    """
     now = datetime.utcnow()
+    user_key = str(user_id)
     user_data = {
         'totalAttempts': 0,
         'totalCorrect': 0,
-        'referralCount': 0,
+        'referral_counts': {},    # dept_id -> int
+        'unlocked_departments': {}, # dept_id -> True
+        'referralCount': 0,  # kept for backward compatibility
         'createdAt': now,
         'currentSession': None
     }
     try:
-        db.collection('users').document(str(user_id)).set(user_data)
-        USER_CACHE[str(user_id)] = user_data
+        db.collection('users').document(user_key).set(user_data)
+        USER_CACHE[user_key] = user_data
     except ResourceExhausted:
         raise
     except Exception as e:
         logger.error(f"Failed to create user {user_id}: {e}")
-        # still continue; caller will handle missing user
+        # continue; caller will handle missing user
 
-    # Handle Referral without read-before-write
-    if referrer_id and str(referrer_id) != str(user_id):
+    # If department-specific referral provided, record it
+    if referrer_id and str(referrer_id) != user_key and ref_dept:
         try:
-            # Record referral
+            # Record referral record for audit
             ref_doc = db.collection('referrals').document()
             ref_doc.set({
                 'inviter_id': str(referrer_id),
-                'invited_id': str(user_id),
+                'invited_id': user_key,
+                'dept_id': str(ref_dept),
                 'timestamp': now
             })
-            # Increment inviter count via merge (no read)
+
             inviter_ref = db.collection('users').document(str(referrer_id))
-            inviter_ref.set({'referralCount': firestore.Increment(1)}, merge=True)
-            # Invalidate inviter in cache if present
+            # Increment inviter's referral count for this department (merge to avoid read)
+            inviter_ref.set({f'referral_counts.{ref_dept}': firestore.Increment(1)}, merge=True)
+
+            # Invalidate inviter cache so future reads reflect updated counts
             inv_key = str(referrer_id)
-            if inv_key in USER_CACHE:
+            USER_CACHE.pop(inv_key, None)
+
+            # Now check if inviter reached threshold for this department
+            try:
+                inviter_doc = inviter_ref.get()
+                if inviter_doc.exists:
+                    inviter_data = inviter_doc.to_dict() or {}
+                    dept_count = int(inviter_data.get('referral_counts', {}).get(ref_dept, 0))
+                else:
+                    dept_count = 0
+            except Exception:
+                dept_count = 0
+
+            dept_unlocked = False
+            if dept_count >= 2:
+                # Unlock this department for inviter
                 try:
-                    # Attempt to update cached value locally if present
-                    USER_CACHE[inv_key]['referralCount'] = USER_CACHE[inv_key].get('referralCount', 0) + 1
-                except Exception:
+                    inviter_ref.set({f'unlocked_departments.{ref_dept}': True}, merge=True)
+                    dept_unlocked = True
+                    # Invalidate cache to reflect unlock
                     USER_CACHE.pop(inv_key, None)
-            return True
+                except Exception:
+                    pass
+
+            return True, True, dept_unlocked
         except ResourceExhausted:
             raise
         except Exception as e:
             logger.error(f"Referral recording failed: {e}")
-    return False
+            return True, False, False
+
+    return True, False, False
 
 def get_ad_to_show(current_index):
     """Return next ad from a cached list of active ads. Refresh cache hourly."""
@@ -267,14 +317,28 @@ def escape_html(text):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
-    referrer = args[0].replace('ref_', '') if args and args[0].startswith('ref_') else None
+    referrer = None
+    ref_dept = None
+    dept_to_start = None
+
+    if args and args[0].startswith('ref_'):
+        rest = unquote_plus(args[0][4:])
+        if '_dept_' in rest:
+            inviter, dept_code = rest.split('_dept_', 1)
+            referrer = inviter
+            ref_dept = dept_code
+        else:
+            referrer = rest
+    elif args and args[0].startswith('dept_'):
+        dept_to_start = unquote_plus(args[0][5:])
 
     # 1. Create/Get User
     user_data = get_user_data(user.id)
-    referral_success = False
-    
+    referral_recorded = False
+    dept_unlocked = False
+
     if not user_data:
-        referral_success = create_user(user.id, referrer)
+        _, referral_recorded, dept_unlocked = create_user(user.id, referrer, ref_dept)
         user_data = get_user_data(user.id)
 
     # Keep basic user profile fields up-to-date
@@ -309,18 +373,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Notify inviter if referral succeeded and threshold reached
-    if referral_success:
-        inviter_data = get_user_data(referrer)
-        if inviter_data and inviter_data.get('referralCount', 0) == 2:
+    # Notify inviter if a department-specific referral was recorded and that dept unlocked
+    if referral_recorded and referrer and ref_dept:
+        try:
+            inviter_id = int(referrer)
+        except Exception:
+            inviter_id = referrer
+
+        if dept_unlocked:
+            dept_display = get_dept_display(ref_dept)
             try:
                 await context.bot.send_message(
-                    chat_id=referrer,
-                    text="🎉 **Congratulations!**\n\nYou have invited 2 users. The remaining 75 questions are now unlocked!",
+                    chat_id=inviter_id,
+                    text=f"🎉 **Congratulations!**\n\nYou have invited 2 users for *{dept_display}*. That department is now unlocked for you!",
                     parse_mode=ParseMode.MARKDOWN
                 )
-            except:
-                pass # Inviter might have blocked bot
+            except Exception:
+                pass
 
     # 2. Check Membership
     is_member = await check_membership(user.id, context.bot)
@@ -359,7 +428,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for d in deps:
         if d.get('totalQuestions', 0) > 0:
-            keyboard.append([InlineKeyboardButton(d.get('_id'), callback_data=f"dept_{d.get('_id')}")])
+            label = d.get('displayName') or d.get('_id')
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"dept_{d.get('_id')}")])
     
     keyboard.append([InlineKeyboardButton("📊 My Score", callback_data="show_score")])
     
@@ -407,19 +477,27 @@ async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, user
     # --- CHECK REFERRAL LOCK (After Q25) ---
     if q_index == 25:
         user_doc = get_user_data(user_id)
-        if user_doc.get('referralCount', 0) < 2:
+        # Check if this department is unlocked for the user
+        unlocked = False
+        if user_doc:
+            unlocked = bool(user_doc.get('unlocked_departments', {}).get(dept_id, False))
+        if not unlocked:
             # Send Summary first
             await send_session_summary(update, context, session, "🔒 Progress Locked")
-            
-            ref_link = f"https://t.me/{context.bot.username}?start=ref_{user_id}"
+
+            # Build department-specific referral link
+            ref_param = f"ref_{user_id}_dept_{dept_id}"
+            ref_link = f"https://t.me/{context.bot.username}?start={quote_plus(ref_param)}"
+            dept_display = get_dept_display(dept_id)
             text = (
                 "🔒 **Content Locked**\n\n"
-                "You have completed the free 25 questions.\n"
-                "**Invite 2 friends** to unlock the remaining 75 questions!\n\n"
+                f"You have completed the free 25 questions for *{dept_display}*.\n"
+                "**Invite 2 friends using your department referral link** to unlock the remaining 75 questions for this department!\n\n"
                 f"Your Referral Link:\n`{ref_link}`"
             )
-            keyboard = [[InlineKeyboardButton("Check Status & Continue", callback_data="check_lock")]]
-            
+            cb_dept = quote_plus(dept_id)
+            keyboard = [[InlineKeyboardButton("Check Status & Continue", callback_data=f"check_lock_{cb_dept}")]]
+
             if update.callback_query:
                 await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
             else:
@@ -659,7 +737,7 @@ async def send_session_summary(update: Update, context: ContextTypes.DEFAULT_TYP
     
     text = (
         f"<b>{title}</b>\n\n"
-        f"Department: {session['department_id']}\n"
+        f"Department: {get_dept_display(session['department_id'])}\n"
         f"Questions Attempted: {total}\n"
         f"Correct Answers: {correct}\n"
         f"Accuracy: {acc:.1f}%"
@@ -734,13 +812,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
     
     elif data == "check_lock":
-        # Re-check referral count
+        # Re-check referral count (legacy non-departmental)
         user_data = get_user_data(user_id)
         if user_data.get('referralCount', 0) >= 2:
             await query.answer("Unlocked!", show_alert=True)
             await next_question_handler(update, context)
         else:
             await query.answer(f"Referrals: {user_data.get('referralCount',0)}/2. Invite more!", show_alert=True)
+
+    elif data.startswith('check_lock_'):
+        # Department-specific lock check. format: check_lock_<deptEncoded>
+        dept_encoded = data[len('check_lock_'):]
+        try:
+            dept_id = unquote_plus(dept_encoded)
+        except Exception:
+            dept_id = dept_encoded
+
+        user_data = get_user_data(user_id)
+        # Check unlocked flag or per-department referral count
+        unlocked = False
+        if user_data:
+            unlocked = bool(user_data.get('unlocked_departments', {}).get(dept_id, False))
+            dept_count = int(user_data.get('referral_counts', {}).get(dept_id, 0))
+        else:
+            dept_count = 0
+
+        if unlocked or dept_count >= 2:
+            await query.answer("Unlocked!", show_alert=True)
+            await next_question_handler(update, context)
+        else:
+            await query.answer(f"Referrals for this department: {dept_count}/2. Invite more!", show_alert=True)
 
     elif data == "resume_session":
         # Just call next_question logic, it pulls from state
@@ -994,7 +1095,7 @@ async def admin_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts.append("No per-department scores yet.")
     else:
         for dept, arr in dept_lists.items():
-            parts.append(f"{dept}:")
+            parts.append(f"{get_dept_display(dept)}:")
             arr.sort(key=lambda x: x[1], reverse=True)
             for j, (uid, acc, att) in enumerate(arr[:3], start=1):
                 udata = get_user_data(uid) or {}
