@@ -646,11 +646,6 @@ async def send_session_summary(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 
-@safe_async_handler
-async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... unchanged (your existing handle_answer) ...
-
-
 # -----------------------------------------------------------------------------
 # 5. CALLBACK ROUTER - FIXED check_lock
 # -----------------------------------------------------------------------------
