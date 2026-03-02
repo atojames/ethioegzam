@@ -262,11 +262,12 @@ def create_user(user_id, referrer_id=None, ref_dept=None):
                         USER_CACHE.pop(inv_key, None)
                         break
                     except Exception as e:
-                        logger.warning(f"Attempt {attempt} failed to persist unlocked_departments for {referrer}/{ref_dept}: {e}")
+                        # Use inv_key (string inviter id) here to avoid referencing an undefined name
+                        logger.warning(f"Attempt {attempt} failed to persist unlocked_departments for {inv_key}/{ref_dept}: {e}")
                         if attempt < max_attempts:
                             time.sleep(0.5 * attempt)
                         else:
-                            logger.error(f"Failed to persist unlocked_departments after {max_attempts} attempts for {referrer}/{ref_dept}")
+                            logger.error(f"Failed to persist unlocked_departments after {max_attempts} attempts for {inv_key}/{ref_dept}")
 
             return True, True, dept_unlocked
         except ResourceExhausted:
