@@ -60,7 +60,12 @@ BROADCAST_WAIT = 21
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=False)
+# Dispatcher/updater will be created later depending on run mode (webhook vs polling)
+dispatcher = None
+updater = None
+
+# Choose run mode: polling if POLLING env var is true, otherwise webhook (Flask)
+USE_POLLING = os.environ.get('POLLING', 'false').lower() in ('1', 'true', 'yes')
 
 def admin_only(func):
     @wraps(func)
@@ -576,6 +581,17 @@ def webhook():
     dispatcher.process_update(update)
     return 'OK'
 
+# Create dispatcher/updater and register handlers depending on run mode
+if USE_POLLING:
+    # polling mode: use Updater
+    from telegram.ext import Updater
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+else:
+    # webhook mode: create a low-level Dispatcher for Flask updates
+    from telegram.ext import Dispatcher as TBDispatcher
+    dispatcher = TBDispatcher(bot, None, workers=0, use_context=False)
+
 # Register handlers
 dispatcher.add_handler(CommandHandler('start', start_command))
 dispatcher.add_handler(CommandHandler('ethioegzam', ethioegzam_command))
@@ -588,4 +604,11 @@ dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), text_me
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    if USE_POLLING:
+        # Start Flask in background so Render health checks succeed, then polling
+        import threading
+        threading.Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': port}, daemon=True).start()
+        updater.start_polling()
+        updater.idle()
+    else:
+        app.run(host='0.0.0.0', port=port)
