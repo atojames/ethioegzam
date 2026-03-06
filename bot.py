@@ -598,10 +598,12 @@ if USE_POLLING:
     from telegram.ext import Updater
     updater = Updater(token=BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
+    logger.info('Starting in POLLING mode')
 else:
     # webhook mode: create a low-level Dispatcher for Flask updates
     from telegram.ext import Dispatcher as TBDispatcher
     dispatcher = TBDispatcher(bot, None, workers=0, use_context=False)
+    logger.info('Starting in WEBHOOK mode (Flask)')
 
 # Register handlers
 dispatcher.add_handler(CommandHandler('start', start_command))
