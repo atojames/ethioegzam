@@ -159,15 +159,36 @@ def send_welcome(message):
     # Handle referral links
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
-        _, ref_user_id, exam_id = args[1].split("_")
-        ref_user_id = int(ref_user_id)
-        if ref_user_id != user_id:
-            # Increment referral count for referrer
-            db.collection('users').document(str(ref_user_id)).update({"referrals": firestore.Increment(1)})
-            # If referrer is in active session and locked, update their local state
-            if ref_user_id in active_sessions and active_sessions[ref_user_id].get('locked'):
-                active_sessions[ref_user_id]['referrals'] += 1
-                bot.send_message(ref_user_id, "🎉 Someone joined using your link!")
+        # Expect format: ref_<ref_user_id>_<exam_id>
+        # exam_id may contain underscores, so split only twice
+        parts = args[1].split("_", 2)
+        if len(parts) == 3:
+            _, ref_user_id_str, exam_id = parts
+            try:
+                ref_user_id = int(ref_user_id_str)
+            except Exception:
+                ref_user_id = None
+
+            if ref_user_id and ref_user_id != user_id:
+                # Increment per-exam referral counter in Firestore (map) and keep total referrals for compatibility
+                try:
+                    doc_ref = db.collection('users').document(str(ref_user_id))
+                    doc_ref.update({
+                        f"referrals_map.{exam_id}": firestore.Increment(1),
+                        "referrals": firestore.Increment(1)
+                    })
+                except Exception:
+                    # Fallback: increment only the generic referrals counter if map update fails
+                    try:
+                        db.collection('users').document(str(ref_user_id)).update({"referrals": firestore.Increment(1)})
+                    except Exception:
+                        pass
+
+                # If the referrer is currently in an active session for the same exam, update their in-memory counter
+                if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
+                    active_sessions[ref_user_id].setdefault('referrals', 0)
+                    active_sessions[ref_user_id]['referrals'] += 1
+                    bot.send_message(ref_user_id, "🎉 Someone joined using your link for this exam!")
 
     if not check_membership(user_id):
         markup = build_inline_keyboard([
