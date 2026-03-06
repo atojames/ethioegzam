@@ -448,7 +448,8 @@ def next_question_callback(call):
     update_activity(user_id)
     if user_id in active_sessions:
         active_sessions[user_id]['current_index'] += 1
-        send_question(user_id, call.message.message_id)
+        # Send the next question as a new message so the previous one remains visible
+        send_question(user_id)
     else:
         bot.answer_callback_query(call.id, "Session expired.")
 
@@ -460,7 +461,8 @@ def check_referral_callback(call):
         if session['referrals'] >= 2:
             session['locked'] = False
             bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
-            send_question(user_id, call.message.message_id)
+            # Resume by sending the next question as a new message
+            send_question(user_id)
         else:
             bot.answer_callback_query(call.id, f"You need {2 - session['referrals']} more users to join.", show_alert=True)
 
