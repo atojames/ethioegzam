@@ -121,80 +121,15 @@ def get_subjects_from_firestore():
     if db is None:
         return {}
     subjects = {}
-    if text in ('Entrance', 'Exit'):
-        if text == 'Entrance':
-            subjects = get_subjects_from_firestore()
-            # create a two-column reply keyboard (auto rows)
-            rows = []
-            row = []
-            for i, (k, v) in enumerate(subjects.items(), start=1):
-                row.append(v.get('name',''))
-                if i % 2 == 0:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            # add a Home/Back row
-            rows.append(['Home', 'Back'])
-            bot.send_message(chat_id=msg.chat_id, text='Select subject:', reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
-        else:
-            deps = get_departments_from_firestore()
-            rows = []
-            row = []
-            for i, (k, v) in enumerate(deps.items(), start=1):
-                row.append(v.get('name',''))
-                if i % 2 == 0:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            rows.append(['Home', 'Back'])
-            bot.send_message(chat_id=msg.chat_id, text='Select department:', reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
-        return
-
-    # If user tapped a subject or department (ReplyKeyboard), map the name back to slug and show exam types
-    subjects = get_subjects_from_firestore()
-    name_to_slug = {v.get('name',''): k for k, v in subjects.items()}
-    if text in name_to_slug:
-        slug = name_to_slug[text]
-        try:
-            if db:
-                exams_col = db.collection('exam').document('entrance').collection('subjects').document(slug).collection('exams')
-                docs = list(exams_col.stream())
-                if not docs:
-                    bot.send_message(chat_id=msg.chat_id, text='No exams uploaded yet for this subject.')
-                    return
-                kb = []
-                for d in docs:
-                    data = d.to_dict()
-                    typename = data.get('typeName', 'exam')
-                    kb.append([InlineKeyboardButton(typename, callback_data=f'start_exam:entrance:{slug}:{d.id}')])
-                bot.send_message(chat_id=msg.chat_id, text='Select exam type:', reply_markup=InlineKeyboardMarkup(kb))
-                return
-        except Exception:
-            logger.exception('Failed to list exams for subject')
-
-    deps = get_departments_from_firestore()
-    name_to_slug_deps = {v.get('name',''): k for k, v in deps.items()}
-    if text in name_to_slug_deps:
-        slug = name_to_slug_deps[text]
-        try:
-            if db:
-                exams_col = db.collection('exam').document('exit').collection('departments').document(slug).collection('exams')
-                docs = list(exams_col.stream())
-                if not docs:
-                    bot.send_message(chat_id=msg.chat_id, text='No exams uploaded yet for this department.')
-                    return
-                kb = []
-                for d in docs:
-                    data = d.to_dict()
-                    typename = data.get('typeName', 'exam')
-                    kb.append([InlineKeyboardButton(typename, callback_data=f'start_exam:exit:{slug}:{d.id}')])
-                bot.send_message(chat_id=msg.chat_id, text='Select exam type:', reply_markup=InlineKeyboardMarkup(kb))
-                return
-        except Exception:
-            logger.exception('Failed to list exams for department')
-    bot.send_message(chat_id=chat_id, text='Choose Exam Type', reply_markup=keyboard)
+    try:
+        col = db.collection('exam').document('entrance').collection('subjects').stream()
+        for doc in col:
+            data = doc.to_dict()
+            subjects[doc.id] = data
+        cache['subjects'] = subjects
+    except Exception:
+        logger.exception('Failed to fetch subjects')
+    return subjects
 
 @admin_only
 def ethioegzam_command(update, context):
