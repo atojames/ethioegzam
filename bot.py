@@ -352,6 +352,10 @@ def send_question(user_id, edit_msg_id=None):
     if not session:
         return
         
+    # Keep track of the last message id that displayed the question (for deletion before ads)
+    # `edit_msg_id` is the message id when we are editing the previous message.
+    # When we send a new message we will store its id below.
+
     # Check Referral Lock
     if session['current_index'] >= 25 and not session['locked']:
         # Lock activated
@@ -373,16 +377,21 @@ def send_question(user_id, edit_msg_id=None):
             else:
                 bot.send_message(user_id, text, reply_markup=markup)
             return
-
+        
     # Check End of Exam
     if session['current_index'] >= len(session['questions']):
         end_exam(user_id, edit_msg_id)
         return
 
-    # Trigger Ad
+    # Trigger Ad: after every 5 questions, only once per index
     if session['current_index'] > 0 and session['current_index'] % 5 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
         session[f"ad_shown_{session['current_index']}"] = True
-        show_advertisement(user_id)
+
+        # Determine which message to delete: prefer edit_msg_id (when we are editing),
+        # otherwise use the session-stored last message id if present.
+        last_q_msg_id = edit_msg_id or session.get('last_msg_id')
+        show_advertisement(user_id, last_question_msg_id=last_q_msg_id)
+        return
 
     q_data = session['questions'][session['current_index']]
     total_q = len(session['questions'])
@@ -400,10 +409,19 @@ def send_question(user_id, edit_msg_id=None):
         ("C", "ans_c"), ("D", "ans_d")
     ], cols=2)
     
-    if edit_msg_id:
-        bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
-    else:
-        bot.send_message(user_id, text, reply_markup=markup)
+    # Send or edit the question and record the message id in session
+    try:
+        if edit_msg_id:
+            bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
+            session['last_msg_id'] = edit_msg_id
+        else:
+            msg = bot.send_message(user_id, text, reply_markup=markup)
+            # store the new message id for potential future deletion when an ad is shown
+            session['last_msg_id'] = msg.message_id
+    except Exception:
+        # Fallback: try to send as a plain message if editing fails
+        msg = bot.send_message(user_id, text, reply_markup=markup)
+        session['last_msg_id'] = getattr(msg, 'message_id', None)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
 def handle_answer(call):
@@ -448,8 +466,7 @@ def next_question_callback(call):
     update_activity(user_id)
     if user_id in active_sessions:
         active_sessions[user_id]['current_index'] += 1
-        # Send the next question as a new message so the previous one remains visible
-        send_question(user_id)
+        send_question(user_id, call.message.message_id)
     else:
         bot.answer_callback_query(call.id, "Session expired.")
 
@@ -461,18 +478,105 @@ def check_referral_callback(call):
         if session['referrals'] >= 2:
             session['locked'] = False
             bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
-            # Resume by sending the next question as a new message
-            send_question(user_id)
+            send_question(user_id, call.message.message_id)
         else:
             bot.answer_callback_query(call.id, f"You need {2 - session['referrals']} more users to join.", show_alert=True)
 
-def show_advertisement(user_id):
+
+@bot.callback_query_handler(func=lambda call: call.data == "skip_ad")
+def skip_ad_callback(call):
+    user_id = call.from_user.id
+    session = active_sessions.get(user_id)
+    if not session:
+        bot.answer_callback_query(call.id, "Session expired.", show_alert=True)
+        return
+
+    ad_ctx = session.pop('ad_context', {}) if session else {}
+    # Delete countdown message and copied ad (if any)
+    try:
+        if ad_ctx.get('countdown_msg_id'):
+            try:
+                bot.delete_message(user_id, ad_ctx['countdown_msg_id'])
+            except Exception:
+                pass
+        if ad_ctx.get('ad_copy_msg_id'):
+            try:
+                bot.delete_message(user_id, ad_ctx['ad_copy_msg_id'])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Resume exam by sending the next question (do not pass edit_msg_id so it sends new message)
+    send_question(user_id)
+    bot.answer_callback_query(call.id)
+
+def show_advertisement(user_id, last_question_msg_id=None):
+    """
+    Show advertisement with a 5-second countdown.
+
+    Behavior:
+    - Delete the question message identified by `last_question_msg_id` (only that message).
+    - Copy the saved ad message (if any) to the user.
+    - Send a separate countdown message (5..1) that will be updated every second.
+    - After countdown finishes, edit the countdown message to include a "Skip" button.
+    - The skip handler will delete the ad messages and resume the exam by sending the next question.
+    """
+    # Delete the previous question message (only the one immediately before the ad)
+    if last_question_msg_id:
+        try:
+            bot.delete_message(user_id, last_question_msg_id)
+        except Exception:
+            # ignore deletion errors (message may already be gone)
+            pass
+
     ad = CACHE.get('ad_data')
+    ad_copy_msg_id = None
+    # Copy ad media/text if available
     if ad and ad.get('message_id') and ad.get('chat_id'):
         try:
-            bot.copy_message(user_id, ad['chat_id'], ad['message_id'])
+            copied = bot.copy_message(user_id, ad['chat_id'], ad['message_id'])
+            ad_copy_msg_id = getattr(copied, 'message_id', None)
         except Exception as e:
-            print(f"Failed to show ad: {e}")
+            print(f"Failed to copy ad message: {e}")
+
+    # Send countdown message and update it every second
+    try:
+        countdown_text = "⏳ Advertisement — resuming in 5s"
+        countdown_msg = bot.send_message(user_id, countdown_text)
+        countdown_msg_id = getattr(countdown_msg, 'message_id', None)
+    except Exception as e:
+        print(f"Failed to send countdown message: {e}")
+        return
+
+    # Store ad context in the user's session so the skip handler can access it
+    session = active_sessions.get(user_id)
+    if session is not None:
+        session['ad_context'] = {
+            'ad_copy_msg_id': ad_copy_msg_id,
+            'countdown_msg_id': countdown_msg_id
+        }
+
+    def run_countdown(chat_id, message_id):
+        # Update the countdown every second
+        for remaining in range(5, 0, -1):
+            try:
+                text = f"⏳ Advertisement — resuming in {remaining}s"
+                bot.edit_message_text(text, chat_id, message_id)
+            except Exception:
+                pass
+            time.sleep(1)
+
+        # After countdown, add Skip button
+        try:
+            final_text = "⏳ Advertisement — you can skip it now"
+            markup = build_inline_keyboard([("Skip", "skip_ad")], cols=1)
+            bot.edit_message_text(final_text, chat_id, message_id, reply_markup=markup)
+        except Exception:
+            pass
+
+    # Run countdown in a background thread so we don't block the bot
+    threading.Thread(target=run_countdown, args=(user_id, countdown_msg_id), daemon=True).start()
 
 def save_session_progress(user_id):
     session = active_sessions.get(user_id)
