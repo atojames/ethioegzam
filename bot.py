@@ -121,79 +121,79 @@ def get_subjects_from_firestore():
     if db is None:
         return {}
     subjects = {}
-    try:
-        col = db.collection('exam').document('entrance').collection('subjects').stream()
-        for doc in col:
-            data = doc.to_dict()
-            subjects[doc.id] = data
-        cache['subjects'] = subjects
-    except Exception:
-        logger.exception('Failed to fetch subjects')
-    return subjects
-
-def get_departments_from_firestore():
-    if cache['departments']:
-        return cache['departments']
-    if db is None:
-        return {}
-    deps = {}
-    try:
-        col = db.collection('exam').document('exit').collection('departments').stream()
-        for doc in col:
-            data = doc.to_dict()
-            deps[doc.id] = data
-        cache['departments'] = deps
-    except Exception:
-        logger.exception('Failed to fetch departments')
-    return deps
-
-def send_admin_panel(chat_id):
-    keyboard = [
-        [InlineKeyboardButton('Add Field', callback_data='admin_add_field'), InlineKeyboardButton('Add Quiz', callback_data='admin_add_quiz')],
-        [InlineKeyboardButton('Add Ad', callback_data='admin_add_ad'), InlineKeyboardButton('Total User', callback_data='admin_total_user')],
-        [InlineKeyboardButton('Broadcast', callback_data='admin_broadcast'), InlineKeyboardButton('Clear Cache', callback_data='admin_clear_cache')],
-        [InlineKeyboardButton('Maintenance', callback_data='admin_maintenance')]
-    ]
-    bot.send_message(chat_id=chat_id, text='Welcome admin. Choose an action:', reply_markup=InlineKeyboardMarkup(keyboard))
-
-def start_command(update, context):
-    global maintenance_mode
-    if update.message is None:
-        return
-    user = update.message.from_user
-    chat_id = update.message.chat_id
-    if maintenance_mode and user.id != ADMIN_TELEGRAM_ID:
-        update.message.reply_text('Bot is updating. Please come back later.')
+    if text in ('Entrance', 'Exit'):
+        if text == 'Entrance':
+            subjects = get_subjects_from_firestore()
+            # create a two-column reply keyboard (auto rows)
+            rows = []
+            row = []
+            for i, (k, v) in enumerate(subjects.items(), start=1):
+                row.append(v.get('name',''))
+                if i % 2 == 0:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            # add a Home/Back row
+            rows.append(['Home', 'Back'])
+            bot.send_message(chat_id=msg.chat_id, text='Select subject:', reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
+        else:
+            deps = get_departments_from_firestore()
+            rows = []
+            row = []
+            for i, (k, v) in enumerate(deps.items(), start=1):
+                row.append(v.get('name',''))
+                if i % 2 == 0:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            rows.append(['Home', 'Back'])
+            bot.send_message(chat_id=msg.chat_id, text='Select department:', reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
         return
 
-    # Register user in Firestore
-    try:
-        if db:
-            udoc = db.collection('users').document(str(user.id))
-            if not udoc.get().exists:
-                udoc.set({'first_name': user.first_name, 'username': user.username, 'created_at': firestore.SERVER_TIMESTAMP})
-    except Exception:
-        logger.exception('Failed to register user')
-
-    # Check membership in PUBLIC_CHANNEL_ID if set
-    if PUBLIC_CHANNEL_ID:
+    # If user tapped a subject or department (ReplyKeyboard), map the name back to slug and show exam types
+    subjects = get_subjects_from_firestore()
+    name_to_slug = {v.get('name',''): k for k, v in subjects.items()}
+    if text in name_to_slug:
+        slug = name_to_slug[text]
         try:
-            member = bot.get_chat_member(chat_id=PUBLIC_CHANNEL_ID, user_id=user.id)
-            if member.status in ('member', 'creator', 'administrator'):
-                show_exam_type_menu(update)
+            if db:
+                exams_col = db.collection('exam').document('entrance').collection('subjects').document(slug).collection('exams')
+                docs = list(exams_col.stream())
+                if not docs:
+                    bot.send_message(chat_id=msg.chat_id, text='No exams uploaded yet for this subject.')
+                    return
+                kb = []
+                for d in docs:
+                    data = d.to_dict()
+                    typename = data.get('typeName', 'exam')
+                    kb.append([InlineKeyboardButton(typename, callback_data=f'start_exam:entrance:{slug}:{d.id}')])
+                bot.send_message(chat_id=msg.chat_id, text='Select exam type:', reply_markup=InlineKeyboardMarkup(kb))
                 return
         except Exception:
-            logger.debug('Membership check failed or not a member')
-    # ask to join
-    keyboard = [[InlineKeyboardButton('Join Channel', url=PUBLIC_CHANNEL_LINK or 'https://t.me')], [InlineKeyboardButton('Check Membership', callback_data='check_membership')]]
-    update.message.reply_text('Please join our channel to continue:', reply_markup=InlineKeyboardMarkup(keyboard))
+            logger.exception('Failed to list exams for subject')
 
-def show_exam_type_menu(update_or_query):
-    if hasattr(update_or_query, 'message'):
-        chat_id = update_or_query.message.chat_id
-    else:
-        chat_id = update_or_query.callback_query.message.chat_id
-    keyboard = ReplyKeyboardMarkup([['Entrance', 'Exit'], ['Quiz Navigation']], resize_keyboard=True)
+    deps = get_departments_from_firestore()
+    name_to_slug_deps = {v.get('name',''): k for k, v in deps.items()}
+    if text in name_to_slug_deps:
+        slug = name_to_slug_deps[text]
+        try:
+            if db:
+                exams_col = db.collection('exam').document('exit').collection('departments').document(slug).collection('exams')
+                docs = list(exams_col.stream())
+                if not docs:
+                    bot.send_message(chat_id=msg.chat_id, text='No exams uploaded yet for this department.')
+                    return
+                kb = []
+                for d in docs:
+                    data = d.to_dict()
+                    typename = data.get('typeName', 'exam')
+                    kb.append([InlineKeyboardButton(typename, callback_data=f'start_exam:exit:{slug}:{d.id}')])
+                bot.send_message(chat_id=msg.chat_id, text='Select exam type:', reply_markup=InlineKeyboardMarkup(kb))
+                return
+        except Exception:
+            logger.exception('Failed to list exams for department')
     bot.send_message(chat_id=chat_id, text='Choose Exam Type', reply_markup=keyboard)
 
 @admin_only
