@@ -583,6 +583,15 @@ def webhook():
     dispatcher.process_update(update)
     return 'OK'
 
+
+@app.route('/', methods=['GET'])
+def index():
+    return "OK", 200
+
+@app.route('/health', methods=['GET'])
+def health():
+    return "OK", 200
+
 # Create dispatcher/updater and register handlers depending on run mode
 if USE_POLLING:
     # polling mode: use Updater
