@@ -542,16 +542,31 @@ else:
     dispatcher = TBDispatcher(bot, None, workers=0, use_context=False)
     logger.info('Starting in WEBHOOK mode (Flask)')
 
-# Register handlers
-dispatcher.add_handler(CommandHandler('start', start_command))
-dispatcher.add_handler(CommandHandler('ethioegzam', ethioegzam_command))
-dispatcher.add_handler(CallbackQueryHandler(admin_callback_handler, pattern='^admin_'))
-dispatcher.add_handler(CallbackQueryHandler(start_subject_handler, pattern='^start_subject:'))
-dispatcher.add_handler(CallbackQueryHandler(start_exam_handler, pattern='^start_exam:'))
-dispatcher.add_handler(CallbackQueryHandler(callback_query_handler, pattern='^(check_membership|answer:|next:|add_quiz_|do_|confirm_|cancel_).*'))
+# Register handlers (use safe lookup so a missing function doesn't crash startup)
+def _get_handler(name):
+    fn = globals().get(name)
+    if callable(fn):
+        return fn
+    logger.warning('Handler %s not defined; installing stub.', name)
+    def _stub(update, context):
+        try:
+            if update and getattr(update, 'message', None):
+                update.message.reply_text(f'Handler {name} is not available.')
+            elif update and getattr(update, 'callback_query', None):
+                update.callback_query.answer()
+        except Exception:
+            pass
+    return _stub
+
+dispatcher.add_handler(CommandHandler('start', _get_handler('start_command')))
+dispatcher.add_handler(CommandHandler('ethioegzam', _get_handler('ethioegzam_command')))
+dispatcher.add_handler(CallbackQueryHandler(_get_handler('admin_callback_handler'), pattern='^admin_'))
+dispatcher.add_handler(CallbackQueryHandler(_get_handler('start_subject_handler'), pattern='^start_subject:'))
+dispatcher.add_handler(CallbackQueryHandler(_get_handler('start_exam_handler'), pattern='^start_exam:'))
+dispatcher.add_handler(CallbackQueryHandler(_get_handler('callback_query_handler'), pattern='^(check_membership|answer:|next:|add_quiz_|do_|confirm_|cancel_).*'))
 # Register text router before the more general message handler so ReplyKeyboard text is routed
-dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), text_message_router))
-dispatcher.add_handler(MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.text, message_handler))
+dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), _get_handler('text_message_router')))
+dispatcher.add_handler(MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.text, _get_handler('message_handler')))
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
