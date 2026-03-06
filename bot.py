@@ -73,16 +73,16 @@ user_sessions = {}  # user_id -> {"last_active": datetime, ...}
 
 # conversation states
 (
-	ADMIN_MENU,
-	ADD_FIELD,
-	ADD_QUIZ_CHOOSE_CATEGORY,
-	ADD_QUIZ_CHOOSE_SUBJECT,
-	ADD_QUIZ_TYPE_NAME,
-	ADD_QUIZ_UPLOAD,
-	ADD_AD_UPLOAD,
-	BROADCAST_MESSAGE,
-	CONFIRM_CLEAR_CACHE,
-	TOGGLE_MAINTENANCE,
+    ADMIN_MENU,
+    ADD_FIELD,
+    ADD_QUIZ_CHOOSE_CATEGORY,
+    ADD_QUIZ_CHOOSE_SUBJECT,
+    ADD_QUIZ_TYPE_NAME,
+    ADD_QUIZ_UPLOAD,
+    ADD_AD_UPLOAD,
+    BROADCAST_MESSAGE,
+    CONFIRM_CLEAR_CACHE,
+    TOGGLE_MAINTENANCE,
 ) = range(10)
 
 # ---------------------------------------------------------------------------
@@ -214,6 +214,8 @@ def admin_entry(update: Update, context: CallbackContext):
 
 
 def admin_button_handler(update: Update, context: CallbackContext):
+	# declare globals used for modification
+	global maintenance_mode
 	query = update.callback_query
 	data = query.data
 	if data == 'add_field':
