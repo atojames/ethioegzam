@@ -428,11 +428,24 @@ def send_question(user_id, edit_msg_id=None):
     # `edit_msg_id` is the message id when we are editing the previous message.
     # When we send a new message we will store its id below.
 
-    # Check Referral Lock
+    # Check Referral Lock: only lock if the exam/department is not unlocked for this user
     if session['current_index'] >= 25 and not session['locked']:
-        # Lock activated
-        session['locked'] = True
-    
+        exam_id = session.get('exam_id')
+        try:
+            user_doc = db.collection('users').document(str(user_id)).get()
+            user_data = user_doc.to_dict() if user_doc.exists else {}
+            unlocked = user_data.get('unlocked_exams', []) if user_data else []
+        except Exception:
+            # on error, assume locked to preserve previous behavior
+            unlocked = []
+
+        if exam_id in unlocked:
+            # exam already unlocked for this user — do not lock, continue normally
+            session['locked'] = False
+        else:
+            # Lock activated
+            session['locked'] = True
+
     if session['locked']:
         if session['referrals'] >= 2:
             session['locked'] = False
@@ -451,11 +464,11 @@ def send_question(user_id, edit_msg_id=None):
                     f"To continue, invite 2 new users using your referral link:\n\n"
                     f"{ref_link}\n\nUsers invited so far: {session.get('referrals', 0)}/2")
 
-            # Build inline keyboard with Check Status callback and Share url button
+            # Build inline keyboard with Share url button and Check Status callback
             markup = InlineKeyboardMarkup()
             try:
-                markup.add(InlineKeyboardButton("Check Status and Continue", callback_data="check_referral"))
                 markup.add(InlineKeyboardButton("Share", url=share_url))
+                markup.add(InlineKeyboardButton("Check Status and Continue", callback_data="check_referral"))
             except Exception:
                 # fallback to single check button
                 markup = build_inline_keyboard([("Check Status and Continue", "check_referral")], cols=1)
@@ -591,7 +604,12 @@ def check_referral_callback(call):
         # Unlock session locally and resume
         session['locked'] = False
         bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
-        send_question(user_id, call.message.message_id)
+        # Delete the lock message then send next question as a new message (resume at Q26)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        send_question(user_id)
     else:
         remaining = max(0, 2 - count_for_exam)
         bot.answer_callback_query(call.id, f"You need {remaining} more users to join.", show_alert=True)
