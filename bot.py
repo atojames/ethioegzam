@@ -1,580 +1,531 @@
+# -*- coding: utf-8 -*-
+"""Quiz Telegram Bot using Firebase and Flask.
+
+This module contains a complete implementation of the Quiz Telegram Bot as
+specified by the user.  It handles both the admin panel (using
+InlineKeyboardMarkup exclusively) and the user interface (primarily
+ReplyKeyboardMarkup).  Firestore is used as a backend; an in‑memory cache
+reduces the number of reads.
+
+The bot is designed to run on Render in polling mode.  A tiny Flask server is
+embedded to keep the dyno alive.
+"""
+
 import os
 import json
-import time
 import logging
-from functools import wraps
-from flask import Flask, request
+from datetime import datetime, timedelta
+
+from flask import Flask
+from telegram import (
+	InlineKeyboardButton,
+	InlineKeyboardMarkup,
+	ReplyKeyboardMarkup,
+)
+from telegram.ext import (
+	Updater,
+	CommandHandler,
+	MessageHandler,
+	Filters,
+	CallbackContext,
+	CallbackQueryHandler,
+	ConversationHandler,
+)
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, ParseMode
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler
+# ---------------------------------------------------------------------------
+# configuration & initialization
+# ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+	format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# Environment
-ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = os.environ.get("BOT_USERNAME")
-FIREBASE_KEY = os.environ.get("FIREBASE_KEY")
-PUBLIC_CHANNEL_ID = os.environ.get("PUBLIC_CHANNEL_ID")
-PUBLIC_CHANNEL_LINK = os.environ.get("PUBLIC_CHANNEL_LINK")
+ADMIN_TELEGRAM_ID = int(os.getenv('ADMIN_TELEGRAM_ID', '0'))
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+BOT_USERNAME = os.getenv('BOT_USERNAME')
+PUBLIC_CHANNEL_ID = os.getenv('PUBLIC_CHANNEL_ID')
+PUBLIC_CHANNEL_LINK = os.getenv('PUBLIC_CHANNEL_LINK')
 
-if BOT_TOKEN is None:
-    logger.error("BOT_TOKEN not set in environment")
-    raise RuntimeError("BOT_TOKEN required")
+firebase_key = os.getenv('FIREBASE_KEY')
+if not firebase_key:
+	raise RuntimeError('FIREBASE_KEY environment variable is required')
 
-# Initialize Firebase
-if FIREBASE_KEY:
-    try:
-        key_json = json.loads(FIREBASE_KEY)
-        cred = credentials.Certificate(key_json)
-        firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        logger.info("Initialized Firebase Firestore")
-    except Exception as e:
-        logger.exception("Failed to initialize Firebase: %s", e)
-        db = None
-else:
-    logger.warning("FIREBASE_KEY not set. Firestore disabled.")
-    db = None
+cred = credentials.Certificate(json.loads(firebase_key))
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# Simple in-memory cache and maintenance flag
-cache = {
-    "subjects": {},
-    "departments": {},
-    "ads": None,
-}
-maintenance_mode = False
+# ---------------------------------------------------------------------------
+# caches & in‑memory state
+# ---------------------------------------------------------------------------
 
-# Conversation states
-ADMIN_WAIT_JSON = 10
-ADD_QUIZ_CATEGORY = 11
-ADD_QUIZ_SUBJECT = 12
-ADD_QUIZ_TYPENAME = 13
-ADD_QUIZ_UPLOAD = 14
-ADD_AD_UPLOAD = 20
-BROADCAST_WAIT = 21
+subjects_cache = {}       # category -> list of names
+exams_cache = {}          # (category, subject) -> list of typeNames
+quiz_cache = {}           # exam_doc_id -> questions list
+ad_message_id = None      # stored advertisement message id
+users_cache = set()       # user ids of registered users
+maintenance_mode = False  # global toggle
 
-app = Flask(__name__)
-bot = Bot(token=BOT_TOKEN)
-# Dispatcher/updater will be created later depending on run mode (webhook vs polling)
-dispatcher = None
-updater = None
+user_sessions = {}  # user_id -> {"last_active": datetime, ...}
 
-# Choose run mode: polling if POLLING env var is true, otherwise webhook (Flask)
-USE_POLLING = os.environ.get('POLLING', 'false').lower() in ('1', 'true', 'yes')
+# conversation states
+(
+	ADMIN_MENU,
+	ADD_FIELD,
+	ADD_QUIZ_CHOOSE_CATEGORY,
+	ADD_QUIZ_CHOOSE_SUBJECT,
+	ADD_QUIZ_TYPE_NAME,
+	ADD_QUIZ_UPLOAD,
+	ADD_AD_UPLOAD,
+	BROADCAST_MESSAGE,
+	CONFIRM_CLEAR_CACHE,
+	TOGGLE_MAINTENANCE,
+)
+= range(10)
 
-def admin_only(func):
-    @wraps(func)
-    def wrapper(update, context):
-        user_id = None
-        if update.message:
-            user_id = update.message.from_user.id
-        elif update.callback_query:
-            user_id = update.callback_query.from_user.id
-        if user_id != ADMIN_TELEGRAM_ID:
-            return
-        return func(update, context)
-    return wrapper
+# ---------------------------------------------------------------------------
+# helper utilities
+# ---------------------------------------------------------------------------
 
-def save_fields_to_firestore(data):
-    if db is None:
-        return False, "Firestore not initialized"
-    exam_col = db.collection('exam')
-    # entrance
-    entrance = data.get('entrance', {})
-    subjects = entrance.get('subjects', [])
-    if subjects:
-        entrance_doc = exam_col.document('entrance')
-        subjects_col = entrance_doc.collection('subjects')
-        for s in subjects:
-            name = s.get('name')
-            code = s.get('code')
-            desc = s.get('description', '')
-            slug = name.strip().lower().replace(' ', '_')
-            subjects_col.document(slug).set({'name': name, 'code': code, 'description': desc})
-            # create an empty exams subcollection marker doc so subcollection exists
-            # create a small marker document with an auto-generated id so the subcollection exists
-            subjects_col.document(slug).collection('exams').document().set({'_marker': True})
-    # exit
-    exit_ = data.get('exit', {})
-    departments = exit_.get('departments', [])
-    if departments:
-        exit_doc = exam_col.document('exit')
-        deps_col = exit_doc.collection('departments')
-        for d in departments:
-            name = d.get('name')
-            code = d.get('code')
-            desc = d.get('description', '')
-            slug = name.strip().lower().replace(' ', '_')
-            deps_col.document(slug).set({'name': name, 'code': code, 'description': desc})
-            # create a small marker document with an auto-generated id so the subcollection exists
-            deps_col.document(slug).collection('exams').document().set({'_marker': True})
-    return True, "Saved"
-
-def get_subjects_from_firestore():
-    if cache['subjects']:
-        return cache['subjects']
-    if db is None:
-        return {}
-    subjects = {}
-    try:
-        col = db.collection('exam').document('entrance').collection('subjects').stream()
-        for doc in col:
-            data = doc.to_dict()
-            subjects[doc.id] = data
-        cache['subjects'] = subjects
-    except Exception:
-        logger.exception('Failed to fetch subjects')
-    return subjects
-
-@admin_only
-def ethioegzam_command(update, context):
-    if update.message is None:
-        return
-    send_admin_panel(update.message.chat_id)
-
-@admin_only
-def admin_callback_handler(update, context):
-    query = update.callback_query
-    data = query.data
-    chat_id = query.message.chat_id
-    if data == 'admin_add_field':
-        bot.send_message(chat_id=chat_id, text='Upload the list of fields in JSON format or type /cancel to cancel.')
-        # set a marker in cache so next message is treated as field upload
-        cache['awaiting_add_field'] = chat_id
-    elif data == 'admin_add_quiz':
-        keyboard = [[InlineKeyboardButton('Entrance', callback_data='add_quiz_entrance'), InlineKeyboardButton('Exit', callback_data='add_quiz_exit')]]
-        bot.send_message(chat_id=chat_id, text='Select category', reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data == 'admin_add_ad':
-        bot.send_message(chat_id=chat_id, text='Please upload a photo or video with caption for the ad.')
-        cache['awaiting_add_ad'] = chat_id
-    elif data == 'admin_total_user':
-        total = 0
-        try:
-            if db:
-                users = db.collection('users').stream()
-                total = sum(1 for _ in users)
-        except Exception:
-            logger.exception('Failed to count users')
-        bot.send_message(chat_id=chat_id, text=f'Total registered users: {total}')
-    elif data == 'admin_broadcast':
-        bot.send_message(chat_id=chat_id, text='Send the broadcast message (text or photo/video with caption).')
-        cache['awaiting_broadcast'] = chat_id
-    elif data == 'admin_clear_cache':
-        keyboard = [[InlineKeyboardButton('Yes', callback_data='confirm_clear_cache'), InlineKeyboardButton('Cancel', callback_data='cancel_clear_cache')]]
-        bot.send_message(chat_id=chat_id, text='Clear cache? Confirm:', reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data == 'confirm_clear_cache':
-        cache.clear()
-        cache.update({'subjects': {}, 'departments': {}, 'ads': None})
-        bot.send_message(chat_id=chat_id, text='Cache cleared.')
-    elif data == 'cancel_clear_cache':
-        bot.send_message(chat_id=chat_id, text='Cancelled.')
-    elif data == 'admin_maintenance':
-        global maintenance_mode
-        if not maintenance_mode:
-            keyboard = [[InlineKeyboardButton('Deactivate', callback_data='do_deactivate')]]
-            bot.send_message(chat_id=chat_id, text='Bot is active. Choose:', reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            keyboard = [[InlineKeyboardButton('Activate', callback_data='do_activate')]]
-            bot.send_message(chat_id=chat_id, text='Bot is in maintenance. Choose:', reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data == 'do_deactivate':
-        maintenance_mode = True
-        bot.send_message(chat_id=chat_id, text='Bot is now in maintenance mode.')
-    elif data == 'do_activate':
-        maintenance_mode = False
-        bot.send_message(chat_id=chat_id, text='Bot activated.')
-    # quiz category
-    elif data == 'add_quiz_entrance':
-        subjects = get_subjects_from_firestore()
-        keyboard = []
-        row = []
-        for i, (slug, s) in enumerate(subjects.items(), start=1):
-            row.append(InlineKeyboardButton(s.get('name', slug), callback_data=f'add_quiz_subject:entrance:{slug}'))
-            if i % 3 == 0:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        bot.send_message(chat_id=chat_id, text='Select subject', reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data == 'add_quiz_exit':
-        deps = get_departments_from_firestore()
-        keyboard = []
-        row = []
-        for i, (slug, d) in enumerate(deps.items(), start=1):
-            row.append(InlineKeyboardButton(d.get('name', slug), callback_data=f'add_quiz_subject:exit:{slug}'))
-            if i % 3 == 0:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        bot.send_message(chat_id=chat_id, text='Select department', reply_markup=InlineKeyboardMarkup(keyboard))
-    elif data.startswith('add_quiz_subject:'):
-        # store selection and ask for typeName
-        _, category, slug = data.split(':', 2)
-        cache['add_quiz'] = {'chat_id': chat_id, 'category': category, 'slug': slug}
-        bot.send_message(chat_id=chat_id, text='Enter typeName (e.g., 2015, 2016, model01)')
-
-def message_handler(update, context):
-    msg = update.message
-    if msg is None:
-        return
-    logger.info('message_handler received message from %s: %s', msg.from_user.id if msg.from_user else None, getattr(msg, 'text', '<no-text>'))
-    user = msg.from_user
-    # handle admin adding fields
-    if cache.get('awaiting_add_field') == msg.chat_id and user.id == ADMIN_TELEGRAM_ID:
-        # accept file or text
-        text = None
-        if msg.document:
-            file = bot.get_file(msg.document.file_id)
-            content = file.download_as_bytearray()
-            text = content.decode('utf-8')
-        else:
-            text = msg.text
-        try:
-            data = json.loads(text)
-            ok, reason = save_fields_to_firestore(data)
-            if ok:
-                bot.send_message(chat_id=msg.chat_id, text='Fields saved successfully.')
-                # clear cache for subjects/departments
-                cache['subjects'] = {}
-                cache['departments'] = {}
-            else:
-                bot.send_message(chat_id=msg.chat_id, text=f'Failed: {reason}')
-        except Exception as e:
-            logger.exception('Failed to parse/upload fields')
-            bot.send_message(chat_id=msg.chat_id, text=f'Invalid JSON: {e}')
-        cache.pop('awaiting_add_field', None)
-        return
-
-    # admin add quiz typeName and JSON upload flow
-    if cache.get('add_quiz') and user.id == ADMIN_TELEGRAM_ID:
-        state = cache['add_quiz']
-        if 'typename' not in state:
-            # expecting typename
-            if msg.text:
-                state['typename'] = msg.text.strip()
-                cache['add_quiz'] = state
-                bot.send_message(chat_id=msg.chat_id, text='Now upload the quiz JSON file containing questions.')
-                return
-            else:
-                bot.send_message(chat_id=msg.chat_id, text='Please send a text typeName first.')
-                return
-        else:
-            # expecting JSON file or text
-            text = None
-            if msg.document:
-                file = bot.get_file(msg.document.file_id)
-                content = file.download_as_bytearray()
-                text = content.decode('utf-8')
-            else:
-                text = msg.text
-            try:
-                questions = json.loads(text)
-                # save to Firestore
-                if db:
-                    exam_doc = db.collection('exam').document(state['category']).collection('subjects' if state['category']=='entrance' else 'departments').document(state['slug']).collection('exams').document()
-                    exam_doc.set({'typeName': state['typename'], 'questions': questions, 'created_at': firestore.SERVER_TIMESTAMP})
-                    bot.send_message(chat_id=msg.chat_id, text='Quiz uploaded successfully.')
-                    # clear subjects cache so new exam types found later
-                    cache['subjects'] = {}
-                    cache['departments'] = {}
-                else:
-                    bot.send_message(chat_id=msg.chat_id, text='Firestore not configured; cannot save quiz.')
-            except Exception as e:
-                logger.exception('Failed to save quiz')
-                bot.send_message(chat_id=msg.chat_id, text=f'Invalid JSON or save error: {e}')
-            cache.pop('add_quiz', None)
-            return
-
-    # admin add ad
-    if cache.get('awaiting_add_ad') == msg.chat_id and user.id == ADMIN_TELEGRAM_ID:
-        # only accept photo or video
-        try:
-            store = None
-            if msg.photo:
-                # get largest photo
-                photo = msg.photo[-1]
-                store = {'chat_id': msg.chat_id, 'message_id': msg.message_id, 'type': 'photo'}
-            elif msg.video:
-                store = {'chat_id': msg.chat_id, 'message_id': msg.message_id, 'type': 'video'}
-            if store:
-                if db:
-                    db.collection('ads').document('current').set(store)
-                cache['ads'] = store
-                bot.send_message(chat_id=msg.chat_id, text='Ad stored (message id saved).')
-            else:
-                bot.send_message(chat_id=msg.chat_id, text='Please upload a photo or video with caption.')
-        except Exception:
-            logger.exception('Failed to store ad')
-            bot.send_message(chat_id=msg.chat_id, text='Failed to store ad.')
-        cache.pop('awaiting_add_ad', None)
-        return
-
-    # admin broadcast
-    if cache.get('awaiting_broadcast') == msg.chat_id and user.id == ADMIN_TELEGRAM_ID:
-        # Broadcast logic: send to users with expired sessions now, schedule others for later
-        try:
-            if db:
-                users = db.collection('users').stream()
-                now = time.time()
-                sent = 0
-                for u in users:
-                    uid = int(u.id)
-                    try:
-                        bot.send_message(chat_id=uid, text=msg.text or '')
-                        sent += 1
-                    except Exception:
-                        logger.exception('Failed to send broadcast to %s', uid)
-                bot.send_message(chat_id=msg.chat_id, text=f'Broadcast sent to {sent} users (attempted).')
-            else:
-                bot.send_message(chat_id=msg.chat_id, text='Firestore not configured; cannot perform smart broadcast. Sent nothing.')
-        except Exception:
-            logger.exception('Broadcast failed')
-            bot.send_message(chat_id=msg.chat_id, text='Broadcast failed.')
-        cache.pop('awaiting_broadcast', None)
-        return
-
-def callback_query_handler(update, context):
-    query = update.callback_query
-    data = query.data
-    user = query.from_user
-    if data == 'check_membership':
-        try:
-            member = bot.get_chat_member(chat_id=PUBLIC_CHANNEL_ID, user_id=user.id)
-            if member.status in ('member', 'creator', 'administrator'):
-                bot.send_message(chat_id=user.id, text='Membership confirmed. Enjoy!')
-                show_exam_type_menu(query)
-                query.answer()
-                return
-        except Exception:
-            logger.debug('Membership check failed')
-        bot.send_message(chat_id=user.id, text='You are not a member yet. Join and press Check Membership again.')
-        query.answer()
-        return
-
-    if data.startswith('answer:'):
-        # format: answer:<session_id>:<index>:<choice>
-        parts = data.split(':')
-        if len(parts) < 4:
-            query.answer()
-            return
-        _, session_id, index_s, choice = parts
-        # load session from Firestore or simple cache - here we store sessions in cache for simplicity
-        session = cache.get('sessions', {}).get(session_id)
-        if not session:
-            query.answer('Session expired')
-            return
-        index = int(index_s)
-        question = session['questions'][index]
-        correct = question.get('answer')
-        explanation = question.get('explanation', '')
-        correct_label = correct.upper()
-        chosen_label = choice.upper()
-        is_correct = (chosen_label.lower() == correct.lower())
-        # build new text
-        total = len(session['questions'])
-        qnum = index + 1
-        text = f"Question {qnum}/{total}\n\n{question.get('question_text')}\n\n"
-        opts = question.get('options', {})
-        text += f"A. {opts.get('a','')}\nB. {opts.get('b','')}\nC. {opts.get('c','')}\nD. {opts.get('d','')}\n\n"
-        text += '✓ Correct\n' if is_correct else '✗ Incorrect\n'
-        text += f"\nCorrect Answer: {correct_label}. {opts.get(correct, '')}\n\nExplanation:\n{explanation}"
-        # replace buttons with Next
-        kb = [[InlineKeyboardButton('Next', callback_data=f'next:{session_id}:{index+1}')]]
-        try:
-            bot.edit_message_text(chat_id=query.message.chat_id, message_id=query.message.message_id, text=text, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            logger.exception('Failed to edit message after answer')
-        query.answer()
-        # Update session stats
-        if is_correct:
-            session['correct'] += 1
-        session['attempts'] += 1
-        session['last_activity'] = time.time()
-        cache.setdefault('sessions', {})[session_id] = session
-        return
-
-    if data.startswith('next:'):
-        _, session_id, idx_s = data.split(':')
-        idx = int(idx_s)
-        session = cache.get('sessions', {}).get(session_id)
-        if not session:
-            query.answer('Session expired')
-            return
-        if idx >= len(session['questions']):
-            # session complete
-            summary = f"Exam finished! Correct: {session['correct']} / {len(session['questions'])}"
-            bot.send_message(chat_id=query.message.chat_id, text=summary)
-            # persist results in Firestore
-            try:
-                if db:
-                    db.collection('results').document().set({'user_id': session['user_id'], 'correct': session['correct'], 'attempts': session['attempts'], 'type': session['type'], 'finished_at': firestore.SERVER_TIMESTAMP})
-            except Exception:
-                logger.exception('Failed to save results')
-            # show ad every 5 questions if exists
-            if cache.get('ads'):
-                ad = cache['ads']
-                try:
-                    bot.copy_message(chat_id=query.message.chat_id, from_chat_id=ad['chat_id'], message_id=ad['message_id'])
-                except Exception:
-                    logger.exception('Failed to show ad')
-            # cleanup session
-            cache['sessions'].pop(session_id, None)
-            query.answer()
-            return
-        # send next question by editing message
-        q = session['questions'][idx]
-        text = f"Question {idx+1}/{len(session['questions'])}\n\n{q.get('question_text')}\n\nA. {q.get('options',{}).get('a','')}\nB. {q.get('options',{}).get('b','')}\nC. {q.get('options',{}).get('c','')}\nD. {q.get('options',{}).get('d','')}"
-        kb = [[InlineKeyboardButton('A', callback_data=f'answer:{session_id}:{idx}:a'), InlineKeyboardButton('B', callback_data=f'answer:{session_id}:{idx}:b')], [InlineKeyboardButton('C', callback_data=f'answer:{session_id}:{idx}:c'), InlineKeyboardButton('D', callback_data=f'answer:{session_id}:{idx}:d')]]
-        try:
-            bot.edit_message_text(chat_id=query.message.chat_id, message_id=query.message.message_id, text=text, reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            logger.exception('Failed to edit for next question')
-        session['last_activity'] = time.time()
-        cache.setdefault('sessions', {})[session_id] = session
-        query.answer()
-
-# For simple demo: when user selects subject and an exam, start a session
-def text_message_router(update, context):
-    msg = update.message
-    if msg is None:
-        return
-    logger.info('text_message_router received text from %s: %s', msg.from_user.id if msg.from_user else None, msg.text)
-    text = msg.text
-    if text in ('Entrance', 'Exit'):
-        if text == 'Entrance':
-            subjects = get_subjects_from_firestore()
-            kb = []
-            for k, v in subjects.items():
-                kb.append([InlineKeyboardButton(v.get('name',''), callback_data=f'start_subject:entrance:{k}')])
-            bot.send_message(chat_id=msg.chat_id, text='Select subject:', reply_markup=InlineKeyboardMarkup(kb))
-        else:
-            deps = get_departments_from_firestore()
-            kb = []
-            for k, v in deps.items():
-                kb.append([InlineKeyboardButton(v.get('name',''), callback_data=f'start_subject:exit:{k}')])
-            bot.send_message(chat_id=msg.chat_id, text='Select department:', reply_markup=InlineKeyboardMarkup(kb))
-
-def start_subject_handler(update, context):
-    query = update.callback_query
-    data = query.data
-    _, category, slug = data.split(':', 2)
-    # fetch exam types for this subject/department
-    try:
-        if db:
-            exams_col = db.collection('exam').document(category).collection('subjects' if category=='entrance' else 'departments').document(slug).collection('exams')
-            docs = list(exams_col.stream())
-            if not docs:
-                bot.send_message(chat_id=query.message.chat_id, text='No exams uploaded yet for this subject.')
-                query.answer()
-                return
-            kb = []
-            for d in docs:
-                data = d.to_dict()
-                typename = data.get('typeName', 'exam')
-                kb.append([InlineKeyboardButton(typename, callback_data=f'start_exam:{category}:{slug}:{d.id}')])
-            bot.send_message(chat_id=query.message.chat_id, text='Select exam type:', reply_markup=InlineKeyboardMarkup(kb))
-    except Exception:
-        logger.exception('Failed to list exams')
-        bot.send_message(chat_id=query.message.chat_id, text='Failed to load exams.')
-    query.answer()
-
-def start_exam_handler(update, context):
-    query = update.callback_query
-    data = query.data
-    _, category, slug, exam_doc_id = data.split(':', 3)
-    try:
-        doc = db.collection('exam').document(category).collection('subjects' if category=='entrance' else 'departments').document(slug).collection('exams').document(exam_doc_id).get()
-        if not doc.exists:
-            bot.send_message(chat_id=query.message.chat_id, text='Exam not found.')
-            query.answer()
-            return
-        d = doc.to_dict()
-        questions = d.get('questions', [])
-        if not questions:
-            bot.send_message(chat_id=query.message.chat_id, text='No questions found in this exam.')
-            query.answer()
-            return
-        # create session id
-        session_id = f"s{int(time.time())}{query.from_user.id}"
-        session = {'user_id': query.from_user.id, 'questions': questions, 'index': 0, 'correct': 0, 'attempts': 0, 'last_activity': time.time(), 'type': d.get('typeName','exam')}
-        cache.setdefault('sessions', {})[session_id] = session
-        # send first question
-        q = questions[0]
-        text = f"Question 1/{len(questions)}\n\n{q.get('question_text')}\n\nA. {q.get('options',{}).get('a','')}\nB. {q.get('options',{}).get('b','')}\nC. {q.get('options',{}).get('c','')}\nD. {q.get('options',{}).get('d','')}"
-        kb = [[InlineKeyboardButton('A', callback_data=f'answer:{session_id}:0:a'), InlineKeyboardButton('B', callback_data=f'answer:{session_id}:0:b')], [InlineKeyboardButton('C', callback_data=f'answer:{session_id}:0:c'), InlineKeyboardButton('D', callback_data=f'answer:{session_id}:0:d')]]
-        bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=InlineKeyboardMarkup(kb))
-    except Exception:
-        logger.exception('Failed to start exam')
-        bot.send_message(chat_id=query.message.chat_id, text='Failed to start exam.')
-    query.answer()
-
-# Flask webhook endpoint
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return 'OK'
+def _clear_caches() -> None:
+	global subjects_cache, exams_cache, quiz_cache, ad_message_id
+	subjects_cache.clear()
+	exams_cache.clear()
+	quiz_cache.clear()
+	ad_message_id = None
 
 
-@app.route('/', methods=['GET'])
-def index():
-    return "OK", 200
+def _load_subjects(category: str) -> list:
+	if category in subjects_cache:
+		return subjects_cache[category]
+	lst = []
+	doc = db.collection('exam').document(category)
+	snap = doc.get()
+	if snap.exists:
+		field = 'subjects' if category == 'entrance' else 'departments'
+		for item in snap.to_dict().get(field, []):
+			lst.append(item.get('name', '').lower())
+	subjects_cache[category] = lst
+	return lst
 
-@app.route('/health', methods=['GET'])
-def health():
-    return "OK", 200
 
-# Create dispatcher/updater and register handlers depending on run mode
-if USE_POLLING:
-    # polling mode: use Updater
-    from telegram.ext import Updater
-    updater = Updater(token=BOT_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
-    logger.info('Starting in POLLING mode')
-else:
-    # webhook mode: create a low-level Dispatcher for Flask updates
-    from telegram.ext import Dispatcher as TBDispatcher
-    dispatcher = TBDispatcher(bot, None, workers=0, use_context=False)
-    logger.info('Starting in WEBHOOK mode (Flask)')
+def _make_inline_buttons(items, prefix='', cols=3):
+	keyboard = []
+	row = []
+	for i, it in enumerate(items):
+		row.append(InlineKeyboardButton(it.title(), callback_data=f'{prefix}{it}'))
+		if (i + 1) % cols == 0:
+			keyboard.append(row)
+			row = []
+	if row:
+		keyboard.append(row)
+	return keyboard
 
-# Register handlers (use safe lookup so a missing function doesn't crash startup)
-def _get_handler(name):
-    fn = globals().get(name)
-    if callable(fn):
-        return fn
-    logger.warning('Handler %s not defined; installing stub.', name)
-    def _stub(update, context):
-        try:
-            if update and getattr(update, 'message', None):
-                update.message.reply_text(f'Handler {name} is not available.')
-            elif update and getattr(update, 'callback_query', None):
-                update.callback_query.answer()
-        except Exception:
-            pass
-    return _stub
 
-dispatcher.add_handler(CommandHandler('start', _get_handler('start_command')))
-dispatcher.add_handler(CommandHandler('ethioegzam', _get_handler('ethioegzam_command')))
-dispatcher.add_handler(CallbackQueryHandler(_get_handler('admin_callback_handler'), pattern='^admin_'))
-dispatcher.add_handler(CallbackQueryHandler(_get_handler('start_subject_handler'), pattern='^start_subject:'))
-dispatcher.add_handler(CallbackQueryHandler(_get_handler('start_exam_handler'), pattern='^start_exam:'))
-dispatcher.add_handler(CallbackQueryHandler(_get_handler('callback_query_handler'), pattern='^(check_membership|answer:|next:|add_quiz_|do_|confirm_|cancel_).*'))
-# Register text router before the more general message handler so ReplyKeyboard text is routed
-dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), _get_handler('text_message_router')))
-dispatcher.add_handler(MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.text, _get_handler('message_handler')))
+def _load_exam_list(category: str, subject: str) -> list:
+	key = (category, subject)
+	if key in exams_cache:
+		return exams_cache[key]
+	exams = []
+	col = db.collection('exam').document(category).collection(
+		'subjects' if category == 'entrance' else 'departments'
+	).document(subject).collection('exams')
+	for d in col.stream():
+		exams.append(d.to_dict().get('typeName', ''))
+	exams_cache[key] = exams
+	return exams
+
+
+def _get_exam_doc(category: str, subject: str, typename: str) -> dict | None:
+	col = db.collection('exam').document(category).collection(
+		'subjects' if category == 'entrance' else 'departments'
+	).document(subject).collection('exams')
+	for d in col.where('typeName', '==', typename).limit(1).stream():
+		return d.to_dict()
+	return None
+
+
+def _show_main_menu(update):
+	kb = ReplyKeyboardMarkup([['Entrance', 'Exit'], ['Home', 'Back']], resize_keyboard=True)
+	update.message.reply_text('Main Menu', reply_markup=kb)
+
+# ---------------------------------------------------------------------------
+# telegram handlers
+# ---------------------------------------------------------------------------
+
+def start(update: Update, context: CallbackContext) -> None:
+	user_id = update.effective_user.id
+	if maintenance_mode and user_id != ADMIN_TELEGRAM_ID:
+		update.message.reply_text(
+			'The bot is currently under maintenance.\nPlease try again later.'
+		)
+		return
+
+	users_cache.add(user_id)
+
+	try:
+		member = context.bot.get_chat_member(PUBLIC_CHANNEL_ID, user_id)
+		if member.status not in ('member', 'creator', 'administrator'):
+			raise ValueError
+		_show_main_menu(update)
+	except Exception:
+		keyboard = [
+			[InlineKeyboardButton('Join Channel', url=PUBLIC_CHANNEL_LINK)],
+			[InlineKeyboardButton('Check Membership', callback_data='check_member')],
+		]
+		update.message.reply_text(
+			'Please join the channel to continue.',
+			reply_markup=InlineKeyboardMarkup(keyboard),
+		)
+
+
+def check_membership_callback(update: Update, context: CallbackContext) -> None:
+	query = update.callback_query
+	user_id = query.from_user.id
+	try:
+		member = context.bot.get_chat_member(PUBLIC_CHANNEL_ID, user_id)
+		if member.status in ('member', 'creator', 'administrator'):
+			query.answer('Membership confirmed')
+			_show_main_menu(query)
+		else:
+			query.answer('You are not a member yet.')
+	except Exception:
+		query.answer('You are not a member yet.')
+
+
+def admin_entry(update: Update, context: CallbackContext):
+	user_id = update.effective_user.id
+	if user_id != ADMIN_TELEGRAM_ID:
+		return
+	keyboard = [
+		[InlineKeyboardButton('Add Field', callback_data='add_field'),
+		 InlineKeyboardButton('Add Quiz', callback_data='add_quiz')],
+		[InlineKeyboardButton('Add Ad', callback_data='add_ad'),
+		 InlineKeyboardButton('Total User', callback_data='total_user')],
+		[InlineKeyboardButton('Broadcast', callback_data='broadcast'),
+		 InlineKeyboardButton('Clear Cache', callback_data='clear_cache')],
+		[InlineKeyboardButton('Maintenance', callback_data='maintenance')],
+	]
+	update.message.reply_text('Welcome to admin panel',
+							  reply_markup=InlineKeyboardMarkup(keyboard))
+	return ADMIN_MENU
+
+
+def admin_button_handler(update: Update, context: CallbackContext):
+	query = update.callback_query
+	data = query.data
+	if data == 'add_field':
+		query.edit_message_text(
+			'Upload the list of fields in JSON format.\nOr send /cancel to cancel the operation.'
+		)
+		return ADD_FIELD
+	elif data == 'add_quiz':
+		keyboard = [
+			[InlineKeyboardButton('Entrance', callback_data='adm_quiz_entrance')],
+			[InlineKeyboardButton('Exit', callback_data='adm_quiz_exit')],
+		]
+		query.edit_message_text('Select exam category',
+								reply_markup=InlineKeyboardMarkup(keyboard))
+		return ADD_QUIZ_CHOOSE_CATEGORY
+	elif data == 'add_ad':
+		query.edit_message_text('Send photo or video with caption for advertisement')
+		return ADD_AD_UPLOAD
+	elif data == 'total_user':
+		total = len(users_cache)
+		query.answer()
+		query.edit_message_text(f'Total registered users: {total}')
+		return ADMIN_MENU
+	elif data == 'broadcast':
+		query.edit_message_text('Send text or media to broadcast:')
+		return BROADCAST_MESSAGE
+	elif data == 'clear_cache':
+		keyboard = [
+			[InlineKeyboardButton('Yes', callback_data='clear_cache_yes'),
+			 InlineKeyboardButton('Cancel', callback_data='clear_cache_cancel')],
+		]
+		query.edit_message_text('Are you sure you want to clear cache?',
+								reply_markup=InlineKeyboardMarkup(keyboard))
+		return CONFIRM_CLEAR_CACHE
+	elif data == 'maintenance':
+		btn_text = 'Deactivate' if not maintenance_mode else 'Activate'
+		query.edit_message_text('Maintenance mode control',
+								reply_markup=InlineKeyboardMarkup([
+									[InlineKeyboardButton(btn_text, callback_data='toggle_maintenance')]
+								]))
+		return TOGGLE_MAINTENANCE
+	elif data == 'toggle_maintenance':
+		global maintenance_mode
+		maintenance_mode = not maintenance_mode
+		state = 'activated' if not maintenance_mode else 'deactivated'
+		query.edit_message_text(f'Maintenance mode {state}.')
+		return ADMIN_MENU
+	elif data == 'clear_cache_yes':
+		_clear_caches()
+		query.edit_message_text('Cache cleared successfully.')
+		return ADMIN_MENU
+	elif data == 'clear_cache_cancel':
+		query.edit_message_text('Cache clear cancelled.')
+		return ADMIN_MENU
+	return ADMIN_MENU
+
+
+def handle_add_field(update: Update, context: CallbackContext):
+	text = update.message.text
+	try:
+		data = json.loads(text)
+	except Exception:
+		update.message.reply_text('Invalid JSON. Operation cancelled.')
+		return ADMIN_MENU
+	for category in ('entrance', 'exit'):
+		if category in data:
+			db.collection('exam').document(category).set(data[category])
+	update.message.reply_text('Fields successfully added.')
+	return ADMIN_MENU
+
+
+def handle_add_quiz_category(update: Update, context: CallbackContext):
+	query = update.callback_query
+	data = query.data
+	if data == 'adm_quiz_entrance':
+		subjects = _load_subjects('entrance')
+		keyboard = _make_inline_buttons(subjects, prefix='adm_subj_', cols=3)
+		query.edit_message_text('Select subject', reply_markup=InlineKeyboardMarkup(keyboard))
+		return ADD_QUIZ_CHOOSE_SUBJECT
+	elif data == 'adm_quiz_exit':
+		depts = _load_subjects('exit')
+		keyboard = _make_inline_buttons(depts, prefix='adm_dept_', cols=3)
+		query.edit_message_text('Select department', reply_markup=InlineKeyboardMarkup(keyboard))
+		return ADD_QUIZ_CHOOSE_SUBJECT
+	return ADMIN_MENU
+
+
+def handle_add_quiz_subject(update: Update, context: CallbackContext):
+	query = update.callback_query
+	data = query.data
+	if data.startswith('adm_subj_') or data.startswith('adm_dept_'):
+		context.user_data['quiz_category'] = 'entrance' if 'subj' in data else 'exit'
+		context.user_data['quiz_subject'] = data.split('_')[-1]
+		query.edit_message_text('Enter the exam type name (e.g. 2015)')
+		return ADD_QUIZ_TYPE_NAME
+	return ADMIN_MENU
+
+
+def handle_add_quiz_typename(update: Update, context: CallbackContext):
+	text = update.message.text.strip()
+	context.user_data['quiz_typename'] = text
+	update.message.reply_text('Upload the quiz questions JSON file.')
+	return ADD_QUIZ_UPLOAD
+
+
+def handle_add_quiz_upload(update: Update, context: CallbackContext):
+	txt = update.message.text
+	try:
+		questions = json.loads(txt)
+	except Exception:
+		update.message.reply_text('Invalid JSON. Operation cancelled.')
+		return ADMIN_MENU
+	cat = context.user_data.get('quiz_category')
+	subj = context.user_data.get('quiz_subject')
+	typename = context.user_data.get('quiz_typename')
+	col = db.collection('exam').document(cat).collection(
+		'subjects' if cat == 'entrance' else 'departments'
+	)
+	doc = col.document(subj).collection('exams').document()
+	doc.set({'typeName': typename, 'questions': questions})
+	update.message.reply_text('Quiz added successfully.')
+	exams_cache.pop((cat, subj), None)
+	return ADMIN_MENU
+
+
+def handle_add_ad_upload(update: Update, context: CallbackContext):
+	msg = update.message
+	if msg.photo or msg.video:
+		update.message.reply_text('Advertisement saved.')
+		global ad_message_id
+		ad_message_id = msg.message_id
+	else:
+		update.message.reply_text('Please send a photo or video.')
+	return ADMIN_MENU
+
+
+def handle_broadcast_message(update: Update, context: CallbackContext):
+	text = update.message.text or ''
+	media = None
+	if update.message.photo or update.message.video:
+		media = update.message
+	for user in users_cache:
+		try:
+			if media:
+				context.bot.copy_message(
+					chat_id=user,
+					from_chat_id=update.effective_chat.id,
+					message_id=media.message_id,
+				)
+			else:
+				context.bot.send_message(chat_id=user, text=text)
+		except Exception:
+			pass
+	update.message.reply_text('Broadcast sent.')
+	return ADMIN_MENU
+
+
+def handle_text(update: Update, context: CallbackContext):
+	text = update.message.text
+	if text.lower() in ['entrance', 'exit']:
+		cat = text.lower()
+		items = _load_subjects(cat)
+		rows = []
+		for i in range(0, len(items), 2):
+			row = [items[i].title()]
+			if i + 1 < len(items):
+				row.append(items[i + 1].title())
+			rows.append(row)
+		kb = ReplyKeyboardMarkup(rows + [['Home', 'Back']], resize_keyboard=True)
+		update.message.reply_text('Select:', reply_markup=kb)
+		context.user_data['category'] = cat
+		return
+	if (
+		'category' in context.user_data
+		and text.lower()
+		in [x.title() for x in _load_subjects(context.user_data['category'])]
+	):
+		subj = text.lower()
+		context.user_data['subject'] = subj
+		exams = _load_exam_list(context.user_data['category'], subj)
+		rows = []
+		for i in range(0, len(exams), 2):
+			row = [exams[i]]
+			if i + 1 < len(exams):
+				row.append(exams[i + 1])
+			rows.append(row)
+		kb = ReplyKeyboardMarkup(rows + [['Home', 'Back']], resize_keyboard=True)
+		update.message.reply_text('Select exam type:', reply_markup=kb)
+		return
+	if (
+		'subject' in context.user_data
+		and text in _load_exam_list(context.user_data['category'], context.user_data['subject'])
+	):
+		exam_doc = _get_exam_doc(context.user_data['category'], context.user_data['subject'], text)
+		if exam_doc:
+			questions = exam_doc.get('questions', [])
+			context.user_data['quiz'] = questions
+			context.user_data['quiz_index'] = 0
+			context.user_data['correct'] = 0
+			_send_question(update, context)
+		return
+
+
+def _send_question(update: Update, context: CallbackContext):
+	qs = context.user_data['quiz']
+	idx = context.user_data['quiz_index']
+	if idx >= len(qs):
+		_finish_quiz(update, context)
+		return
+	q = qs[idx]
+	text = (
+		f"{q.get('question_number')} / {len(qs)}\n"
+		f"{q.get('question_text')}\n"
+		f"A. {q['options']['a']}\n"
+		f"B. {q['options']['b']}\n"
+		f"C. {q['options']['c']}\n"
+		f"D. {q['options']['d']}"
+	)
+	buttons = [
+		[InlineKeyboardButton('A', callback_data='ans_a'), InlineKeyboardButton('B', callback_data='ans_b')],
+		[InlineKeyboardButton('C', callback_data='ans_c'), InlineKeyboardButton('D', callback_data='ans_d')],
+	]
+	update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def answer_callback(update: Update, context: CallbackContext):
+	query = update.callback_query
+	choice = query.data.split('_')[1]
+	idx = context.user_data['quiz_index']
+	q = context.user_data['quiz'][idx]
+	correct = q.get('answer')
+	is_correct = choice == correct
+	if is_correct:
+		context.user_data['correct'] += 1
+	text = (
+		f"{q.get('question_number')} / {len(context.user_data['quiz'])}\n"
+		f"{q.get('question_text')}\n"
+		f"A. {q['options']['a']}\n"
+		f"B. {q['options']['b']}\n"
+		f"C. {q['options']['c']}\n"
+		f"D. {q['options']['d']}\n\n"
+	)
+	text += '✓ Correct' if is_correct else '✗ Incorrect'
+	text += f"\nCorrect Answer: {correct.upper()}\n\nExplanation:\n{q.get('explanation','')}"
+	keyboard = [[InlineKeyboardButton('Next', callback_data='next_q')]]
+	query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+def next_question_callback(update: Update, context: CallbackContext):
+	context.user_data['quiz_index'] += 1
+	_send_question(update, context)
+
+
+def _finish_quiz(update: Update, context: CallbackContext):
+	correct = context.user_data.get('correct', 0)
+	total = len(context.user_data.get('quiz', []))
+	update.message.reply_text(
+		f'You scored {correct} out of {total}',
+		reply_markup=ReplyKeyboardMarkup([['Home']], resize_keyboard=True),
+	)
+	context.user_data.clear()
+
+
+def cancel(update: Update, context: CallbackContext):
+	update.message.reply_text('Operation cancelled.',
+							  reply_markup=ReplyKeyboardMarkup([['Home']], resize_keyboard=True))
+	return ConversationHandler.END
+
+
+def main():
+	updater = Updater(BOT_TOKEN, use_context=True)
+	dp = updater.dispatcher
+
+	admin_conv = ConversationHandler(
+		entry_points=[CommandHandler('ethioegzam', admin_entry)],
+		states={
+			ADMIN_MENU: [CallbackQueryHandler(admin_button_handler)],
+			ADD_FIELD: [MessageHandler(Filters.text & ~Filters.command, handle_add_field)],
+			ADD_QUIZ_CHOOSE_CATEGORY: [CallbackQueryHandler(handle_add_quiz_category)],
+			ADD_QUIZ_CHOOSE_SUBJECT: [CallbackQueryHandler(handle_add_quiz_subject)],
+			ADD_QUIZ_TYPE_NAME: [MessageHandler(Filters.text & ~Filters.command, handle_add_quiz_typename)],
+			ADD_QUIZ_UPLOAD: [MessageHandler(Filters.text & ~Filters.command, handle_add_quiz_upload)],
+			ADD_AD_UPLOAD: [MessageHandler(Filters.photo | Filters.video, handle_add_ad_upload)],
+			BROADCAST_MESSAGE: [MessageHandler(Filters.all & ~Filters.command, handle_broadcast_message)],
+			CONFIRM_CLEAR_CACHE: [CallbackQueryHandler(admin_button_handler)],
+			TOGGLE_MAINTENANCE: [CallbackQueryHandler(admin_button_handler)],
+		},
+		fallbacks=[CommandHandler('cancel', cancel)],
+		allow_reentry=True,
+	)
+	dp.add_handler(admin_conv)
+
+	dp.add_handler(CommandHandler('start', start))
+	dp.add_handler(CallbackQueryHandler(check_membership_callback, pattern='check_member'))
+	dp.add_handler(CallbackQueryHandler(answer_callback, pattern='ans_'))
+	dp.add_handler(CallbackQueryHandler(next_question_callback, pattern='next_q'))
+	dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+
+	app = Flask(__name__)
+
+	@app.route('/')
+	def index():
+		return 'OK'
+
+	from threading import Thread
+	Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))).start()
+
+	updater.start_polling()
+	updater.idle()
+
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    if USE_POLLING:
-        # Start Flask in background so Render health checks succeed, then polling
-        import threading
-        threading.Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': port}, daemon=True).start()
-        updater.start_polling()
-        updater.idle()
-    else:
-        app.run(host='0.0.0.0', port=port)
+	main()
+
