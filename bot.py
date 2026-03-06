@@ -287,6 +287,7 @@ def message_handler(update, context):
     msg = update.message
     if msg is None:
         return
+    logger.info('message_handler received message from %s: %s', msg.from_user.id if msg.from_user else None, getattr(msg, 'text', '<no-text>'))
     user = msg.from_user
     # handle admin adding fields
     if cache.get('awaiting_add_field') == msg.chat_id and user.id == ADMIN_TELEGRAM_ID:
@@ -507,6 +508,7 @@ def text_message_router(update, context):
     msg = update.message
     if msg is None:
         return
+    logger.info('text_message_router received text from %s: %s', msg.from_user.id if msg.from_user else None, msg.text)
     text = msg.text
     if text in ('Entrance', 'Exit'):
         if text == 'Entrance':
@@ -612,8 +614,9 @@ dispatcher.add_handler(CallbackQueryHandler(admin_callback_handler, pattern='^ad
 dispatcher.add_handler(CallbackQueryHandler(start_subject_handler, pattern='^start_subject:'))
 dispatcher.add_handler(CallbackQueryHandler(start_exam_handler, pattern='^start_exam:'))
 dispatcher.add_handler(CallbackQueryHandler(callback_query_handler, pattern='^(check_membership|answer:|next:|add_quiz_|do_|confirm_|cancel_).*'))
-dispatcher.add_handler(MessageHandler(Filters.text | Filters.document | Filters.photo | Filters.video, message_handler))
+# Register text router before the more general message handler so ReplyKeyboard text is routed
 dispatcher.add_handler(MessageHandler(Filters.text & (~Filters.command), text_message_router))
+dispatcher.add_handler(MessageHandler(Filters.document | Filters.photo | Filters.video | Filters.text, message_handler))
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
