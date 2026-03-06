@@ -83,8 +83,7 @@ user_sessions = {}  # user_id -> {"last_active": datetime, ...}
 	BROADCAST_MESSAGE,
 	CONFIRM_CLEAR_CACHE,
 	TOGGLE_MAINTENANCE,
-)
-= range(10)
+) = range(10)
 
 # ---------------------------------------------------------------------------
 # helper utilities
