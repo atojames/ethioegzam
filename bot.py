@@ -206,7 +206,6 @@ def send_welcome(message):
                 if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
                     active_sessions[ref_user_id].setdefault('referrals', 0)
                     active_sessions[ref_user_id]['referrals'] += 1
-                    bot.send_message(ref_user_id, "🎉 Someone joined using your link for this exam!")
 
                 # After updating Firestore, check whether inviter has reached unlock threshold for this exam
                 try:
@@ -458,11 +457,11 @@ def send_question(user_id, edit_msg_id=None):
                 "ከዚ በፊት የነበሩ የ Entrance and Exit Exam ጥያቄዎችን እና ሌሎች ከ 50,000 በላይ የሚሆኑ ጥያቄዎችን የያዘ ነው ከነ ማብራሪያቸው።\n\n"
                 f"{ref_link}"
             )
-            share_url = f"https://t.me/share/url?url={quote_plus(ref_link)}&text={quote_plus(share_text)}"
+            share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
             text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n"
                     f"To continue, invite 2 new users using your referral link:\n\n"
-                    f"{ref_link}\n\nUsers invited so far: {session.get('referrals', 0)}/2")
+                    f"{ref_link}\n\n")
 
             # Build inline keyboard with Share url button and Check Status callback
             markup = InlineKeyboardMarkup()
@@ -575,8 +574,8 @@ def next_question_callback(call):
 def check_referral_callback(call):
     user_id = call.from_user.id
     session = active_sessions.get(user_id)
-    if not session or not session.get('locked'):
-        bot.answer_callback_query(call.id, "No locked session found.")
+    if not session:
+        bot.answer_callback_query(call.id, "Session expired.")
         return
 
     exam_id = session.get('exam_id')
@@ -590,8 +589,7 @@ def check_referral_callback(call):
     except Exception:
         count_for_exam = session.get('referrals', 0)
         unlocked = []
-
-    if count_for_exam >= 2:
+    if count_for_exam >= 2 or exam_id in unlocked:
         # Persist unlocked exam if not already
         if exam_id not in unlocked:
             try:
@@ -949,14 +947,14 @@ def background_worker():
         
         # Check sessions
         for uid, session in list(active_sessions.items()):
-            if now - session['last_activity'] > timedelta(hours=1):
+            if now - session['last_activity'] > timedelta(hours=4):
                 expired_users.append(uid)
                 
         for uid in expired_users:
             try:
                 save_session_progress(uid)
                 del active_sessions[uid]
-                bot.send_message(uid, "Your exam session has expired due to 1 hour of inactivity.")
+                bot.send_message(uid, "Your exam session has expired due to 4 hour of inactivity.")
                 
                 # Send queued broadcasts
                 if uid in queued_broadcasts:
