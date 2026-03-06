@@ -3,6 +3,7 @@ import json
 import time
 import threading
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from flask import Flask
 import telebot
@@ -154,13 +155,19 @@ def maintenance_check(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
-    register_user(user_id, message.from_user.username)
-    
-    # Handle referral links
+    # Check whether this user already exists in Firestore before registering
+    user_doc_ref = db.collection('users').document(str(user_id))
+    try:
+        user_doc = user_doc_ref.get()
+        user_already_registered = user_doc.exists
+    except Exception:
+        # If we can't read, assume not registered to preserve previous behavior
+        user_already_registered = False
+
+    # Handle referral links only if the user is new (prevent duplicate referrals)
     args = message.text.split()
-    if len(args) > 1 and args[1].startswith("ref_"):
+    if not user_already_registered and len(args) > 1 and args[1].startswith("ref_"):
         # Expect format: ref_<ref_user_id>_<exam_id>
-        # exam_id may contain underscores, so split only twice
         parts = args[1].split("_", 2)
         if len(parts) == 3:
             _, ref_user_id_str, exam_id = parts
@@ -170,25 +177,69 @@ def send_welcome(message):
                 ref_user_id = None
 
             if ref_user_id and ref_user_id != user_id:
-                # Increment per-exam referral counter in Firestore (map) and keep total referrals for compatibility
+                # Persist referral relationship (inviter, invited, timestamp, exam_id)
                 try:
-                    doc_ref = db.collection('users').document(str(ref_user_id))
-                    doc_ref.update({
+                    db.collection('referrals').add({
+                        'inviter_id': ref_user_id,
+                        'invited_id': user_id,
+                        'exam_id': exam_id,
+                        'timestamp': datetime.utcnow()
+                    })
+                except Exception:
+                    pass
+
+                # Increment per-exam counter and total referrals for inviter in Firestore
+                try:
+                    inviter_ref = db.collection('users').document(str(ref_user_id))
+                    inviter_ref.update({
                         f"referrals_map.{exam_id}": firestore.Increment(1),
                         "referrals": firestore.Increment(1)
                     })
                 except Exception:
-                    # Fallback: increment only the generic referrals counter if map update fails
+                    # Fallback to increment generic referrals only
                     try:
                         db.collection('users').document(str(ref_user_id)).update({"referrals": firestore.Increment(1)})
                     except Exception:
                         pass
 
-                # If the referrer is currently in an active session for the same exam, update their in-memory counter
+                # If inviter has an active session for the same exam, update in-memory count
                 if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
                     active_sessions[ref_user_id].setdefault('referrals', 0)
                     active_sessions[ref_user_id]['referrals'] += 1
                     bot.send_message(ref_user_id, "🎉 Someone joined using your link for this exam!")
+
+                # After updating Firestore, check whether inviter has reached unlock threshold for this exam
+                try:
+                    inviter_doc = db.collection('users').document(str(ref_user_id)).get()
+                    inviter_data = inviter_doc.to_dict() if inviter_doc.exists else {}
+                    referrals_map = inviter_data.get('referrals_map', {}) if inviter_data else {}
+                    count_for_exam = referrals_map.get(exam_id, 0)
+                    unlocked = inviter_data.get('unlocked_exams', []) if inviter_data else []
+
+                    if count_for_exam >= 2 and exam_id not in unlocked:
+                        # Persist unlocked exam for inviter
+                        try:
+                            db.collection('users').document(str(ref_user_id)).update({
+                                'unlocked_exams': firestore.ArrayUnion([exam_id])
+                            })
+                        except Exception:
+                            pass
+
+                        # If inviter has active session for this exam, unlock their session and notify
+                        if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
+                            active_sessions[ref_user_id]['locked'] = False
+                            bot.send_message(ref_user_id, f"🔓 Your exam {exam_id} has been unlocked (2 referrals).")
+                        else:
+                            # Notify inviter about unlocked exam
+                            try:
+                                bot.send_message(ref_user_id, f"🔓 {exam_id} has been unlocked because you invited {count_for_exam} users.")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+    # Now register the user if not already
+    register_user(user_id, message.from_user.username)
 
     if not check_membership(user_id):
         markup = build_inline_keyboard([
@@ -388,11 +439,27 @@ def send_question(user_id, edit_msg_id=None):
         else:
             bot_username = BOT_USERNAME
             ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}_{session['exam_id']}"
+            # Prepare share URL and message
+            share_text = (
+                "ለ Entrance and Exit Exam የሚሆን Bot አጊንቻለው\n\n"
+                "ከዚ በፊት የነበሩ የ Entrance and Exit Exam ጥያቄዎችን እና ሌሎች ከ 50,000 በላይ የሚሆኑ ጥያቄዎችን የያዘ ነው ከነ ማብራሪያቸው።\n\n"
+                f"{ref_link}"
+            )
+            share_url = f"https://t.me/share/url?url={quote_plus(ref_link)}&text={quote_plus(share_text)}"
+
             text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n"
                     f"To continue, invite 2 new users using your referral link:\n\n"
-                    f"{ref_link}\n\nUsers invited so far: {session['referrals']}/2")
-            markup = build_inline_keyboard([("Check Status and Continue", "check_referral")], cols=1)
-            
+                    f"{ref_link}\n\nUsers invited so far: {session.get('referrals', 0)}/2")
+
+            # Build inline keyboard with Check Status callback and Share url button
+            markup = InlineKeyboardMarkup()
+            try:
+                markup.add(InlineKeyboardButton("Check Status and Continue", callback_data="check_referral"))
+                markup.add(InlineKeyboardButton("Share", url=share_url))
+            except Exception:
+                # fallback to single check button
+                markup = build_inline_keyboard([("Check Status and Continue", "check_referral")], cols=1)
+
             if edit_msg_id:
                 bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
             else:
@@ -495,13 +562,39 @@ def next_question_callback(call):
 def check_referral_callback(call):
     user_id = call.from_user.id
     session = active_sessions.get(user_id)
-    if session and session.get('locked'):
-        if session['referrals'] >= 2:
-            session['locked'] = False
-            bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
-            send_question(user_id, call.message.message_id)
-        else:
-            bot.answer_callback_query(call.id, f"You need {2 - session['referrals']} more users to join.", show_alert=True)
+    if not session or not session.get('locked'):
+        bot.answer_callback_query(call.id, "No locked session found.")
+        return
+
+    exam_id = session.get('exam_id')
+    # Read inviter's referral counts from Firestore
+    try:
+        inviter_doc = db.collection('users').document(str(user_id)).get()
+        inviter_data = inviter_doc.to_dict() if inviter_doc.exists else {}
+        referrals_map = inviter_data.get('referrals_map', {}) if inviter_data else {}
+        count_for_exam = referrals_map.get(exam_id, 0)
+        unlocked = inviter_data.get('unlocked_exams', []) if inviter_data else []
+    except Exception:
+        count_for_exam = session.get('referrals', 0)
+        unlocked = []
+
+    if count_for_exam >= 2:
+        # Persist unlocked exam if not already
+        if exam_id not in unlocked:
+            try:
+                db.collection('users').document(str(user_id)).update({
+                    'unlocked_exams': firestore.ArrayUnion([exam_id])
+                })
+            except Exception:
+                pass
+
+        # Unlock session locally and resume
+        session['locked'] = False
+        bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
+        send_question(user_id, call.message.message_id)
+    else:
+        remaining = max(0, 2 - count_for_exam)
+        bot.answer_callback_query(call.id, f"You need {remaining} more users to join.", show_alert=True)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "skip_ad")
