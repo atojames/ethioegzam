@@ -97,7 +97,8 @@ def save_fields_to_firestore(data):
             slug = name.strip().lower().replace(' ', '_')
             subjects_col.document(slug).set({'name': name, 'code': code, 'description': desc})
             # create an empty exams subcollection marker doc so subcollection exists
-            subjects_col.document(slug).collection('exams').document('__meta__').set({'created': True})
+            # create a small marker document with an auto-generated id so the subcollection exists
+            subjects_col.document(slug).collection('exams').document().set({'_marker': True})
     # exit
     exit_ = data.get('exit', {})
     departments = exit_.get('departments', [])
@@ -110,7 +111,8 @@ def save_fields_to_firestore(data):
             desc = d.get('description', '')
             slug = name.strip().lower().replace(' ', '_')
             deps_col.document(slug).set({'name': name, 'code': code, 'description': desc})
-            deps_col.document(slug).collection('exams').document('__meta__').set({'created': True})
+            # create a small marker document with an auto-generated id so the subcollection exists
+            deps_col.document(slug).collection('exams').document().set({'_marker': True})
     return True, "Saved"
 
 def get_subjects_from_firestore():
