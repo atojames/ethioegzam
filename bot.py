@@ -264,7 +264,8 @@ def verify_membership_callback(call):
 
 def show_main_menu(user_id):
     user_states[user_id] = {"menu": "main"}
-    markup = build_reply_keyboard(["Entrance", "Exit"], cols=2)
+    # Add Score button on second row
+    markup = build_reply_keyboard(["Entrance", "Exit", "Score"], cols=2)
     bot.send_message(user_id, "Welcome! Please select a category:", reply_markup=markup)
 
 @bot.message_handler(func=lambda msg: msg.text in ["Entrance", "Exit", "Home", "Back"])
@@ -279,6 +280,22 @@ def navigation_handler(message):
         return
 
     handle_navigation_action(user_id, text)
+
+
+@bot.message_handler(func=lambda msg: msg.text == "Score")
+def show_cumulative_score(message):
+    """Show user's all-time cumulative score from Firestore."""
+    user_id = message.from_user.id
+    try:
+        doc = db.collection('users').document(str(user_id)).get()
+        data = doc.to_dict() if doc.exists else {}
+        total_attempts = data.get('total_attempts', 0)
+        total_correct = data.get('total_correct', 0)
+    except Exception:
+        total_attempts = 0
+        total_correct = 0
+
+    bot.send_message(user_id, f"📊 <b>Your Cumulative Score</b>\n\nTotal Attempts: {total_attempts}\nTotal Correct: {total_correct}")
 
 def handle_navigation_action(user_id, action):
     state = user_states.get(user_id, {"menu": "main"})
@@ -316,6 +333,16 @@ def nav_confirmation(call):
         
     # User confirmed, delete active session
     if user_id in active_sessions:
+        # Show temporary session score before ending session
+        try:
+            sess = active_sessions[user_id]
+            correct = sess.get('correct', 0)
+            attempts = sess.get('current_index', 0)
+            bot.send_message(user_id, f"🔔 <b>Temporary Score</b>\n\nCorrect: {correct}\nAttempts: {attempts}")
+        except Exception:
+            pass
+
+        # persist progress then end session
         save_session_progress(user_id)
         del active_sessions[user_id]
         
@@ -476,6 +503,15 @@ def send_question(user_id, edit_msg_id=None):
                 bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
             else:
                 bot.send_message(user_id, text, reply_markup=markup)
+
+            # Immediately after showing lock message, display temporary session score
+            try:
+                temp_correct = session.get('correct', 0)
+                temp_attempts = session.get('current_index', 0)
+                bot.send_message(user_id, f"🔔 <b>Temporary Score</b>\n\nCorrect: {temp_correct}\nAttempts: {temp_attempts}")
+            except Exception:
+                pass
+
             return
         
     # Check End of Exam
