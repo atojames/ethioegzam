@@ -265,10 +265,11 @@ def verify_membership_callback(call):
 def show_main_menu(user_id):
     user_states[user_id] = {"menu": "main"}
     # Add Score button on second row
-    markup = build_reply_keyboard(["Entrance", "Exit", "Score"], cols=2)
+    # Update displayed labels: use full names but keep internal logic unchanged
+    markup = build_reply_keyboard(["Entrance Exam", "Exit Exam", "Score"], cols=2)
     bot.send_message(user_id, "Welcome! Please select a category:", reply_markup=markup)
 
-@bot.message_handler(func=lambda msg: msg.text in ["Entrance", "Exit", "Home", "Back"])
+@bot.message_handler(func=lambda msg: msg.text in ["Entrance Exam", "Exit Exam", "Home", "Back"])
 def navigation_handler(message):
     user_id = message.from_user.id
     text = message.text
@@ -279,7 +280,15 @@ def navigation_handler(message):
         bot.send_message(user_id, f"Are you sure you want to go {text}? Your current exam session will be closed.", reply_markup=markup)
         return
 
-    handle_navigation_action(user_id, text)
+    # Map displayed labels back to existing internal action names so existing
+    # navigation logic (which expects "Entrance" / "Exit") remains unchanged.
+    mapped_action = text
+    if text == "Entrance Exam":
+        mapped_action = "Entrance"
+    elif text == "Exit Exam":
+        mapped_action = "Exit"
+
+    handle_navigation_action(user_id, mapped_action)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "Score")
@@ -444,7 +453,7 @@ def start_exam(message):
     # type during an active session.
     try:
         nav_only = build_reply_keyboard([], cols=2, add_nav=True)
-        bot.send_message(user_id, "Starting exam... Good luck!", reply_markup=nav_only)
+        bot.send_message(user_id, "", reply_markup=nav_only)
     except Exception:
         # If updating the keyboard fails, proceed silently to start the exam
         pass
@@ -489,8 +498,8 @@ def send_question(user_id, edit_msg_id=None):
             ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}_{session['exam_id']}"
             # Prepare share URL and message
             share_text = (
-                "ለ Entrance and Exit Exam የሚሆን Bot አጊንቻለው\n\n"
-                "ከዚ በፊት የነበሩ የ Entrance and Exit Exam ጥያቄዎችን እና ሌሎች ከ 50,000 በላይ የሚሆኑ ጥያቄዎችን የያዘ ነው ከነ ማብራሪያቸው።\n\n"
+                "ለ Entrance እና Exit Exam ዝግጅት የሚሆን ምርጥ Bot አግኝቻለሁ!\n\n"
+                "ይህ Bot የ2015፣ 2016፣ 2017 እና 2018 ያለፉ ፈተናዎችን እንዲሁም ከ50,000 በላይ ተጨማሪ ሞዴል ጥያቄዎችን ከነሙሉ ማብራሪያቸው አጠቃልሎ የያዘ ነው።\n\n"
                 f"{ref_link}"
             )
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
@@ -797,7 +806,7 @@ def admin_panel(message):
         ("Maintenance", "admin_maintenance")
     ], cols=2)
     
-    bot.send_message(message.from_user.id, "🛠 <b>Admin Panel</b>", reply_markup=markup)
+    bot.send_message(message.from_user.id, "🛠 <b>Welcome! Admin Panel</b>", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
 def admin_callbacks(call):
