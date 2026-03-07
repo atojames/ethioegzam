@@ -495,7 +495,7 @@ def start_exam(message):
     # type during an active session.
     try:
         nav_only = build_reply_keyboard([], cols=2, add_nav=True)
-        bot.send_message(user_id, "Start", reply_markup=nav_only)
+        bot.send_message(user_id, "Starting exam... Good luck!", reply_markup=nav_only)
     except Exception:
         # If updating the keyboard fails, proceed silently to start the exam
         pass
@@ -546,8 +546,8 @@ def send_question(user_id, edit_msg_id=None):
             )
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
-            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n"
-                    f"To unlock the next step, please invite 2 new users! You can use the Share button to send this bot to your class group:\n\n"
+            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n\n"
+                    f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
                     )
 
             # Build inline keyboard with Share url button and Check Status callback
