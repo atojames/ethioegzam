@@ -439,7 +439,16 @@ def start_exam(message):
         "locked": False,
         "referrals": 0
     }
-    
+    # Replace the exam-type reply keyboard with a minimal navigation keyboard
+    # containing only Back and Home so the user cannot select another exam
+    # type during an active session.
+    try:
+        nav_only = build_reply_keyboard([], cols=2, add_nav=True)
+        bot.send_message(user_id, "Starting exam... Good luck!", reply_markup=nav_only)
+    except Exception:
+        # If updating the keyboard fails, proceed silently to start the exam
+        pass
+
     send_question(user_id)
 
 # ==========================================
