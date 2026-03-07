@@ -142,6 +142,43 @@ def update_activity(user_id):
     if user_id in active_sessions:
         active_sessions[user_id]['last_activity'] = datetime.now()
 
+
+def format_exam_display(exam_id):
+    """Format exam_id like 'Entrance_COM03_2016' into a user-friendly string:
+    '{Entrance or Exit} : {Department/Subject Name} - {TypeName}'
+    Falls back to the raw exam_id when parsing or lookups fail.
+    """
+    try:
+        parts = str(exam_id).split("_", 2)
+        if len(parts) >= 2:
+            category = parts[0]
+            item_code = parts[1]
+            type_name = parts[2] if len(parts) == 3 else ""
+
+            # Find human-readable name for the item_code in cache
+            item_name = None
+            if category.lower() == 'entrance':
+                for name, code in CACHE.get('entrance_subjects', {}).items():
+                    if code == item_code:
+                        item_name = name
+                        break
+            elif category.lower() == 'exit':
+                for name, code in CACHE.get('exit_departments', {}).items():
+                    if code == item_code:
+                        item_name = name
+                        break
+
+            if not item_name:
+                item_name = item_code
+
+            if type_name:
+                return f"{category} : {item_name} - {type_name}"
+            else:
+                return f"{category} : {item_name}"
+    except Exception:
+        pass
+    return str(exam_id)
+
 # ==========================================
 # 6. MIDDLEWARE / PRE-CHECKS
 # ==========================================
@@ -227,11 +264,16 @@ def send_welcome(message):
                         # If inviter has active session for this exam, unlock their session and notify
                         if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
                             active_sessions[ref_user_id]['locked'] = False
-                            bot.send_message(ref_user_id, f"🔓 Your exam {exam_id} has been unlocked (2 referrals).")
+                            try:
+                                display = format_exam_display(exam_id)
+                                bot.send_message(ref_user_id, f"🔓 Your exam {display} has been unlocked (2 referrals).")
+                            except Exception:
+                                bot.send_message(ref_user_id, f"🔓 Your exam {exam_id} has been unlocked (2 referrals).")
                         else:
                             # Notify inviter about unlocked exam
                             try:
-                                bot.send_message(ref_user_id, f"🔓 {exam_id} has been unlocked because you invited {count_for_exam} users.")
+                                display = format_exam_display(exam_id)
+                                bot.send_message(ref_user_id, f"🔓 Your exam {display} has been unlocked because you invited 2 users.")
                             except Exception:
                                 pass
                 except Exception:
@@ -453,7 +495,7 @@ def start_exam(message):
     # type during an active session.
     try:
         nav_only = build_reply_keyboard([], cols=2, add_nav=True)
-        bot.send_message(user_id, "", reply_markup=nav_only)
+        bot.send_message(user_id, "Start", reply_markup=nav_only)
     except Exception:
         # If updating the keyboard fails, proceed silently to start the exam
         pass
@@ -505,8 +547,8 @@ def send_question(user_id, edit_msg_id=None):
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
             text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n"
-                    f"To continue, invite 2 new users using your referral link:\n\n"
-                    f"{ref_link}\n\n")
+                    f"To unlock the next step, please invite 2 new users! You can use the Share button to send this bot to your class group:\n\n"
+                    )
 
             # Build inline keyboard with Share url button and Check Status callback
             markup = InlineKeyboardMarkup()
@@ -526,7 +568,7 @@ def send_question(user_id, edit_msg_id=None):
             try:
                 temp_correct = session.get('correct', 0)
                 temp_attempts = session.get('current_index', 0)
-                bot.send_message(user_id, f"🔔 <b>Temporary Score</b>\n\nCorrect: {temp_correct}\nAttempts: {temp_attempts}")
+                bot.send_message(user_id, f"🔔 <b>Current Score</b>\n\nCorrect: {temp_correct}\nAttempts: {temp_attempts}")
             except Exception:
                 pass
 
