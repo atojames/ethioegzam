@@ -7,6 +7,7 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from flask import Flask
 import telebot
+import html
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -143,6 +144,16 @@ def update_activity(user_id):
         active_sessions[user_id]['last_activity'] = datetime.now()
 
 
+def safe_html(text):
+    """Escape text for HTML parse_mode while preserving bot-owned tags.
+    Use this for user-provided content (questions, options, explanations).
+    """
+    try:
+        return html.escape(str(text))
+    except Exception:
+        return str(text)
+
+
 def format_exam_display(exam_id):
     """Format exam_id like 'Entrance_COM03_2016' into a user-friendly string:
     '{Entrance or Exit} : {Department/Subject Name} - {TypeName}'
@@ -266,14 +277,14 @@ def send_welcome(message):
                             active_sessions[ref_user_id]['locked'] = False
                             try:
                                 display = format_exam_display(exam_id)
-                                bot.send_message(ref_user_id, f"🔓 Your exam {display} has been unlocked (2 referrals).")
+                                bot.send_message(ref_user_id, f"🔓 Your {safe_html(display)} has been unlocked (2 referrals).")
                             except Exception:
-                                bot.send_message(ref_user_id, f"🔓 Your exam {exam_id} has been unlocked (2 referrals).")
+                                bot.send_message(ref_user_id, f"🔓 Your {safe_html(exam_id)} has been unlocked (2 referrals).")
                         else:
                             # Notify inviter about unlocked exam
                             try:
                                 display = format_exam_display(exam_id)
-                                bot.send_message(ref_user_id, f"🔓 Your exam {display} has been unlocked because you invited 2 users.")
+                                bot.send_message(ref_user_id, f"🔓 Your {safe_html(display)} has been unlocked because you invited 2 users.")
                             except Exception:
                                 pass
                 except Exception:
@@ -592,13 +603,13 @@ def send_question(user_id, edit_msg_id=None):
     q_data = session['questions'][session['current_index']]
     total_q = len(session['questions'])
     
-    text = (f"<b>{session['title']}</b>\n\n"
+        text = (f"<b>{safe_html(session['title'])}</b>\n\n"
             f"Question {session['current_index'] + 1} / {total_q}\n\n"
-            f"{q_data['question_text']}\n\n"
-            f"A. {q_data['options']['a']}\n"
-            f"B. {q_data['options']['b']}\n"
-            f"C. {q_data['options']['c']}\n"
-            f"D. {q_data['options']['d']}")
+            f"{safe_html(q_data.get('question_text',''))}\n\n"
+            f"A. {safe_html(q_data.get('options',{}).get('a',''))}\n"
+            f"B. {safe_html(q_data.get('options',{}).get('b',''))}\n"
+            f"C. {safe_html(q_data.get('options',{}).get('c',''))}\n"
+            f"D. {safe_html(q_data.get('options',{}).get('d',''))}")
             
     markup = build_inline_keyboard([
         ("A", "ans_a"), ("B", "ans_b"),
@@ -641,16 +652,16 @@ def handle_answer(call):
         
     total_q = len(session['questions'])
     
-    text = (f"<b>{session['title']}</b>\n\n"
+        text = (f"<b>{safe_html(session['title'])}</b>\n\n"
             f"Question {session['current_index'] + 1} / {total_q}\n\n"
-            f"{q_data['question_text']}\n\n"
-            f"A. {q_data['options']['a']}\n"
-            f"B. {q_data['options']['b']}\n"
-            f"C. {q_data['options']['c']}\n"
-            f"D. {q_data['options']['d']}\n\n"
+            f"{safe_html(q_data.get('question_text',''))}\n\n"
+            f"A. {safe_html(q_data.get('options',{}).get('a',''))}\n"
+            f"B. {safe_html(q_data.get('options',{}).get('b',''))}\n"
+            f"C. {safe_html(q_data.get('options',{}).get('c',''))}\n"
+            f"D. {safe_html(q_data.get('options',{}).get('d',''))}\n\n"
             f"<b>{result_icon}</b>\n"
-            f"Correct Answer: {correct_ans.upper()}\n\n"
-            f"Explanation:\n{q_data.get('explanation', 'No explanation provided.')}")
+            f"Correct Answer: {safe_html(correct_ans.upper())}\n\n"
+            f"Explanation:\n{safe_html(q_data.get('explanation', 'No explanation provided.'))}")
             
     markup = build_inline_keyboard([("Next", "next_question")], cols=1)
     
