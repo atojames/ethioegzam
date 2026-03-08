@@ -418,9 +418,27 @@ def nav_confirmation(call):
 def item_selection_handler(message):
     user_id = message.from_user.id
     text = message.text
-    
-    category = "Entrance" if text in CACHE['entrance_subjects'] else "Exit"
-    item_code = CACHE['entrance_subjects'].get(text) or CACHE['exit_departments'].get(text)
+    # Determine category from the user's navigation state to avoid
+    # ambiguity when the same name exists in both Entrance and Exit.
+    state = user_states.get(user_id, {})
+    menu = state.get('menu')
+
+    if menu == 'entrance_subjects':
+        category = 'Entrance'
+    elif menu == 'exit_departments':
+        category = 'Exit'
+    else:
+        # Fallback: determine by which cache contains the name
+        category = "Entrance" if text in CACHE['entrance_subjects'] else "Exit"
+
+    # Pick the item_code from the appropriate cache according to the resolved category
+    if category == 'Entrance':
+        item_code = CACHE['entrance_subjects'].get(text)
+    else:
+        item_code = CACHE['exit_departments'].get(text)
+    # If item_code couldn't be resolved for some reason, fallback to previous OR behavior
+    if not item_code:
+        item_code = CACHE['entrance_subjects'].get(text) or CACHE['exit_departments'].get(text)
     
     user_states[user_id] = {"menu": "exam_selection", "category": category, "item_code": item_code, "item_name": text}
     
