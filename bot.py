@@ -602,8 +602,7 @@ def send_question(user_id, edit_msg_id=None):
 
     q_data = session['questions'][session['current_index']]
     total_q = len(session['questions'])
-    
-        text = (f"<b>{safe_html(session['title'])}</b>\n\n"
+    text = (f"<b>{safe_html(session['title'])}</b>\n\n"
             f"Question {session['current_index'] + 1} / {total_q}\n\n"
             f"{safe_html(q_data.get('question_text',''))}\n\n"
             f"A. {safe_html(q_data.get('options',{}).get('a',''))}\n"
@@ -651,8 +650,7 @@ def handle_answer(call):
         result_icon = "✗ Incorrect"
         
     total_q = len(session['questions'])
-    
-        text = (f"<b>{safe_html(session['title'])}</b>\n\n"
+    text = (f"<b>{safe_html(session['title'])}</b>\n\n"
             f"Question {session['current_index'] + 1} / {total_q}\n\n"
             f"{safe_html(q_data.get('question_text',''))}\n\n"
             f"A. {safe_html(q_data.get('options',{}).get('a',''))}\n"
