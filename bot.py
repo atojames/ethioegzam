@@ -329,7 +329,7 @@ def navigation_handler(message):
     
     # Check if user is in an active session to prompt confirmation
     if user_id in active_sessions and text in ["Home", "Back"]:
-        markup = build_inline_keyboard([("Yes", f"confirm_{text.lower()}"), ("Cancel", "cancel_nav")], cols=2)
+        markup = build_inline_keyboard([("Yes, Exit", f"confirm_{text.lower()}"), ("No, Cancel", "cancel_nav")], cols=2)
         bot.send_message(user_id, f"Are you sure you want to go {text}? Your current exam session will be closed.", reply_markup=markup)
         return
 
