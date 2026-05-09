@@ -544,7 +544,7 @@ def send_question(user_id, edit_msg_id=None):
     # When we send a new message we will store its id below.
 
     # Check Referral Lock: only lock if the exam/department is not unlocked for this user
-    if session['current_index'] >= 7 and not session['locked']:
+    if session['current_index'] >= 25 and not session['locked']:
         exam_id = session.get('exam_id')
         try:
             user_doc = db.collection('users').document(str(user_id)).get()
@@ -575,7 +575,7 @@ def send_question(user_id, edit_msg_id=None):
             )
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
-            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 7 questions.\n\n"
+            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have completed 25 questions.\n\n"
                     f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
                     )
 
