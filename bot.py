@@ -609,7 +609,7 @@ def send_question(user_id, edit_msg_id=None):
         return
 
     # Trigger Ad: after every 5 questions, only once per index
-    if session['current_index'] > 0 and session['current_index'] % 5 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
+    if session['current_index'] > 0 and session['current_index'] % 24 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
         session[f"ad_shown_{session['current_index']}"] = True
 
         # Determine which message to delete: prefer edit_msg_id (when we are editing),
