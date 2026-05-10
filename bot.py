@@ -809,24 +809,27 @@ def show_advertisement(user_id, last_question_msg_id=None):
             'ad_copy_msg_id': ad_copy_msg_id,
             'countdown_msg_id': countdown_msg_id
         }
-
+    
     def run_countdown(chat_id, message_id):
-        # Update the countdown every second
-        for remaining in range(5, 0, -1):
-            try:
-                text = f"⏳ Advertisement — resuming in {remaining}s"
-                bot.edit_message_text(text, chat_id, message_id)
-            except Exception:
-                pass
-            time.sleep(1)
-
-        # After countdown, add Skip button
+        # wait 5 seconds without spamming edits
+        time.sleep(5)
+    
         try:
             final_text = "⏳ Advertisement — you can skip it now"
-            markup = build_inline_keyboard([("Skip", "skip_ad")], cols=1)
-            bot.edit_message_text(final_text, chat_id, message_id, reply_markup=markup)
-        except Exception:
-            pass
+            markup = build_inline_keyboard(
+                [("Skip", "skip_ad")],
+                cols=1
+            )
+    
+            bot.edit_message_text(
+                final_text,
+                chat_id,
+                message_id,
+                reply_markup=markup
+            )
+    
+        except Exception as e:
+            print(e)
 
     # Run countdown in a background thread so we don't block the bot
     threading.Thread(target=run_countdown, args=(user_id, countdown_msg_id), daemon=True).start()
