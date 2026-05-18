@@ -544,7 +544,7 @@ def send_question(user_id, edit_msg_id=None):
     # When we send a new message we will store its id below.
 
     # Check Referral Lock: only lock if the exam/department is not unlocked for this user
-    if session['current_index'] >= 10 and not session['locked']:
+    if session['current_index'] >= 25 and not session['locked']:
         exam_id = session.get('exam_id')
         try:
             user_doc = db.collection('users').document(str(user_id)).get()
