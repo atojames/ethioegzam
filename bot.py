@@ -575,7 +575,7 @@ def send_question(user_id, edit_msg_id=None):
             )
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
-            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have reached your daily limit.\n\n"
+            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have finished the free 25 questions.\n\n"
                     f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
                     )
 
@@ -609,7 +609,7 @@ def send_question(user_id, edit_msg_id=None):
         return
 
     # Trigger Ad: after every 5 questions, only once per index
-    if session['current_index'] > 0 and session['current_index'] % 200 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
+    if session['current_index'] > 0 and session['current_index'] % 5 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
         session[f"ad_shown_{session['current_index']}"] = True
 
         # Determine which message to delete: prefer edit_msg_id (when we are editing),
