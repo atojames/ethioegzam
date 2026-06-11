@@ -511,8 +511,8 @@ def premium_start(message):
     """Entry point for users to purchase premium"""
     user_id = message.from_user.id
     markup = build_inline_keyboard([
-        ("Entrance - 150 ETB (All Subjects)", "premcat_entrance"),
-        ("Exit - 150 ETB (Per Department)", "premcat_exit")
+        ("Entrance - 150 ETB ", "premcat_entrance"),
+        ("Exit - 150 ETB ", "premcat_exit")
     ], cols=1)
     bot.send_message(user_id, "🌟 <b>Upgrade to Premium</b>\n\nChoose a category to upgrade:", reply_markup=markup)
 
