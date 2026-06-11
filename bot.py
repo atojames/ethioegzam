@@ -283,6 +283,20 @@ def send_welcome(message):
 
     show_main_menu(user_id)
 
+@bot.message_handler(commands=['cancel'])
+def cancel_operation(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id, {})
+    
+    # Only cancel if they are in the premium flow
+    if state.get("menu") in ["awaiting_payment", "premium_exit_select", "awaiting_screenshot"]:
+        user_states[user_id]["menu"] = "main"
+        bot.send_message(user_id, "❌ Premium subscription process cancelled.")
+        show_main_menu(user_id)
+    else:
+        bot.send_message(user_id, "There is no active process to cancel right now.")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "check_membership")
 def verify_membership_callback(call):
     if check_membership(call.from_user.id):
@@ -519,6 +533,10 @@ def premium_category_select(call):
     else:
         user_states[user_id] = {"menu": "premium_exit_select"}
         departments = [(name, f"premdept_{code}") for name, code in CACHE['exit_departments'].items()]
+        
+        # --- NEW: Add a Back button pointing to the previous menu ---
+        departments.append(("🔙 Back", "trigger_premium")) 
+        
         markup = build_inline_keyboard(departments, cols=2)
         bot.edit_message_text("Select the Exit Exam department you want to unlock:", user_id, call.message.message_id, reply_markup=markup)
 
@@ -536,9 +554,24 @@ def send_payment_info(user_id, target_name):
             "Amount: <b>150 ETB</b>\n"
             "CBE Account: 1000649561382 (Jemal Hussen Hassen)\n"
             "Telebirr: 0906365418\n\n"
-            "Once you have made the transfer, click the button below to upload your screenshot.")
-    markup = build_inline_keyboard([("📤 Upload Screenshot", "upload_screenshot")], cols=1)
+            "Once you have made the transfer, click the button below to upload your screenshot.\n"
+            "<i>(Or send /cancel to abort)</i>") # Friendly reminder of the command
+            
+    # --- NEW: Add a Cancel button ---
+    markup = build_inline_keyboard([
+        ("📤 Upload Screenshot", "upload_screenshot"),
+        ("❌ Cancel", "cancel_premium")
+    ], cols=1)
+    
     bot.send_message(user_id, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "cancel_premium")
+def cancel_premium_callback(call):
+    user_id = call.from_user.id
+    # Safely reset state
+    user_states[user_id] = {"menu": "main"}
+    bot.edit_message_text("❌ Premium subscription cancelled.", user_id, call.message.message_id)
+    show_main_menu(user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "upload_screenshot")
 def upload_screenshot_prompt(call):
