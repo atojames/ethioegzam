@@ -676,11 +676,14 @@ def send_question(user_id, edit_msg_id=None):
             )
             share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
 
-            text = (f"🔒 <b>Exam Locked!</b>\n\nYou have finished the free 25 questions.\n\n"
-                    f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
-                    )
-
-            # --- UI: temporarily hide the Upgrade Premium button (backend unchanged) ---
+            text = (
+            f"🔒 <b>Exam Locked!</b>\n\n"
+            f"You've completed the free 25 questions.\n\n"
+            f"👉 Invite 2 users to unlock more questions for free.\n"
+            f"👉 Or send /premium for instant access to all exam categories.\n\n"
+            f"Share the bot with your friends or upgrade to Premium to continue."
+            )
+          
             markup = InlineKeyboardMarkup()
             try:
                 markup.add(InlineKeyboardButton("Share", url=share_url))
