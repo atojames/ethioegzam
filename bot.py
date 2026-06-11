@@ -427,7 +427,7 @@ def item_selection_handler(message):
     markup = build_reply_keyboard(exams, cols=2, add_nav=True)
     bot.send_message(user_id, f"Select an exam type for {text}:", reply_markup=markup)
 
-@bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("menu") == "exam_selection")
+@bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("menu") == "exam_selection" and not msg.text.startswith('/'))
 def start_exam(message):
     user_id = message.from_user.id
     exam_type = message.text
@@ -484,6 +484,8 @@ def start_exam(message):
     except Exception:
         pass
 
+
+    user_states[user_id]["menu"] = "active_exam"
     send_question(user_id)
 
 # ==========================================
