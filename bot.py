@@ -55,7 +55,7 @@ CACHE = {
 }
 
 # User states: active sessions, navigation path, etc.
-user_states = {}       # {user_id: {"menu": "main", "category": "entrance", "subject": "Biology"}}
+user_states = {}       # {user_id: {"menu": "main", "category": "entrance", "subject": "Biology", "premium_type": "entrance", "target_code": "all"}}
 active_sessions = {}   # {user_id: {"exam_id": ..., "questions": [...], "current_index": 0, "correct": 0, "last_activity": timestamp, "locked": False, "referrals": 0}}
 queued_broadcasts = {} # {user_id: [messages]}
 MAINTENANCE_MODE = False
@@ -145,9 +145,7 @@ def update_activity(user_id):
 
 
 def safe_html(text):
-    """Escape text for HTML parse_mode while preserving bot-owned tags.
-    Use this for user-provided content (questions, options, explanations).
-    """
+    """Escape text for HTML parse_mode while preserving bot-owned tags."""
     try:
         return html.escape(str(text))
     except Exception:
@@ -155,10 +153,7 @@ def safe_html(text):
 
 
 def format_exam_display(exam_id):
-    """Format exam_id like 'Entrance_COM03_2016' into a user-friendly string:
-    '{Entrance or Exit} : {Department/Subject Name} - {TypeName}'
-    Falls back to the raw exam_id when parsing or lookups fail.
-    """
+    """Format exam_id into a user-friendly string"""
     try:
         parts = str(exam_id).split("_", 2)
         if len(parts) >= 2:
@@ -166,7 +161,6 @@ def format_exam_display(exam_id):
             item_code = parts[1]
             type_name = parts[2] if len(parts) == 3 else ""
 
-            # Find human-readable name for the item_code in cache
             item_name = None
             if category.lower() == 'entrance':
                 for name, code in CACHE.get('entrance_subjects', {}).items():
@@ -203,19 +197,15 @@ def maintenance_check(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
-    # Check whether this user already exists in Firestore before registering
     user_doc_ref = db.collection('users').document(str(user_id))
     try:
         user_doc = user_doc_ref.get()
         user_already_registered = user_doc.exists
     except Exception:
-        # If we can't read, assume not registered to preserve previous behavior
         user_already_registered = False
 
-    # Handle referral links only if the user is new (prevent duplicate referrals)
     args = message.text.split()
     if not user_already_registered and len(args) > 1 and args[1].startswith("ref_"):
-        # Expect format: ref_<ref_user_id>_<exam_id>
         parts = args[1].split("_", 2)
         if len(parts) == 3:
             _, ref_user_id_str, exam_id = parts
@@ -225,7 +215,6 @@ def send_welcome(message):
                 ref_user_id = None
 
             if ref_user_id and ref_user_id != user_id:
-                # Persist referral relationship (inviter, invited, timestamp, exam_id)
                 try:
                     db.collection('referrals').add({
                         'inviter_id': ref_user_id,
@@ -236,7 +225,6 @@ def send_welcome(message):
                 except Exception:
                     pass
 
-                # Increment per-exam counter and total referrals for inviter in Firestore
                 try:
                     inviter_ref = db.collection('users').document(str(ref_user_id))
                     inviter_ref.update({
@@ -244,18 +232,15 @@ def send_welcome(message):
                         "referrals": firestore.Increment(1)
                     })
                 except Exception:
-                    # Fallback to increment generic referrals only
                     try:
                         db.collection('users').document(str(ref_user_id)).update({"referrals": firestore.Increment(1)})
                     except Exception:
                         pass
 
-                # If inviter has an active session for the same exam, update in-memory count
                 if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
                     active_sessions[ref_user_id].setdefault('referrals', 0)
                     active_sessions[ref_user_id]['referrals'] += 1
 
-                # After updating Firestore, check whether inviter has reached unlock threshold for this exam
                 try:
                     inviter_doc = db.collection('users').document(str(ref_user_id)).get()
                     inviter_data = inviter_doc.to_dict() if inviter_doc.exists else {}
@@ -264,7 +249,6 @@ def send_welcome(message):
                     unlocked = inviter_data.get('unlocked_exams', []) if inviter_data else []
 
                     if count_for_exam >= 2 and exam_id not in unlocked:
-                        # Persist unlocked exam for inviter
                         try:
                             db.collection('users').document(str(ref_user_id)).update({
                                 'unlocked_exams': firestore.ArrayUnion([exam_id])
@@ -272,7 +256,6 @@ def send_welcome(message):
                         except Exception:
                             pass
 
-                        # If inviter has active session for this exam, unlock their session and notify
                         if ref_user_id in active_sessions and active_sessions[ref_user_id].get('exam_id') == exam_id:
                             active_sessions[ref_user_id]['locked'] = False
                             try:
@@ -281,7 +264,6 @@ def send_welcome(message):
                             except Exception:
                                 bot.send_message(ref_user_id, f"🔓 Your {safe_html(exam_id)} has been unlocked (2 referrals).")
                         else:
-                            # Notify inviter about unlocked exam
                             try:
                                 display = format_exam_display(exam_id)
                                 bot.send_message(ref_user_id, f"🔓 Your {safe_html(display)} has been unlocked because you invited 2 users.")
@@ -290,15 +272,9 @@ def send_welcome(message):
                 except Exception:
                     pass
 
-    # Now register the user if not already
     register_user(user_id, message.from_user.username)
 
     if not check_membership(user_id):
-        markup = build_inline_keyboard([
-            ("Join Channel", PUBLIC_CHANNEL_LINK),
-            ("Check Membership", "check_membership")
-        ], cols=1)
-        # Inline buttons that contain URLs don't have callbacks. Correct format:
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("Join Channel", url=PUBLIC_CHANNEL_LINK))
         markup.add(InlineKeyboardButton("Check Membership", callback_data="check_membership"))
@@ -317,8 +293,6 @@ def verify_membership_callback(call):
 
 def show_main_menu(user_id):
     user_states[user_id] = {"menu": "main"}
-    # Add Score button on second row
-    # Update displayed labels: use full names but keep internal logic unchanged
     markup = build_reply_keyboard(["Entrance Exam", "Exit Exam", "Score"], cols=2)
     bot.send_message(user_id, "Welcome! Please select a category:", reply_markup=markup)
 
@@ -327,14 +301,11 @@ def navigation_handler(message):
     user_id = message.from_user.id
     text = message.text
     
-    # Check if user is in an active session to prompt confirmation
     if user_id in active_sessions and text in ["Home", "Back"]:
         markup = build_inline_keyboard([("Yes, Exit", f"confirm_{text.lower()}"), ("No, Cancel", "cancel_nav")], cols=2)
         bot.send_message(user_id, f"Are you sure you want to go {text}? Your current exam session will be closed.", reply_markup=markup)
         return
 
-    # Map displayed labels back to existing internal action names so existing
-    # navigation logic (which expects "Entrance" / "Exit") remains unchanged.
     mapped_action = text
     if text == "Entrance Exam":
         mapped_action = "Entrance"
@@ -343,10 +314,8 @@ def navigation_handler(message):
 
     handle_navigation_action(user_id, mapped_action)
 
-
 @bot.message_handler(func=lambda msg: msg.text == "Score")
 def show_cumulative_score(message):
-    """Show user's all-time cumulative score from Firestore."""
     user_id = message.from_user.id
     try:
         doc = db.collection('users').document(str(user_id)).get()
@@ -379,9 +348,9 @@ def handle_navigation_action(user_id, action):
         bot.send_message(user_id, "Select a Department:", reply_markup=markup)
         
     elif action == "Back":
-        if state["menu"] in ["entrance_subjects", "exit_departments"]:
+        if state.get("menu") in ["entrance_subjects", "exit_departments"]:
             show_main_menu(user_id)
-        elif state["menu"] == "exam_selection":
+        elif state.get("menu") == "exam_selection":
             category = state.get("category", "Entrance")
             handle_navigation_action(user_id, category)
 
@@ -393,9 +362,7 @@ def nav_confirmation(call):
     if call.data == "cancel_nav":
         return
         
-    # User confirmed, delete active session
     if user_id in active_sessions:
-        # Show temporary session score before ending session
         try:
             sess = active_sessions[user_id]
             correct = sess.get('correct', 0)
@@ -404,7 +371,6 @@ def nav_confirmation(call):
         except Exception:
             pass
 
-        # persist progress then end session
         save_session_progress(user_id)
         del active_sessions[user_id]
         
@@ -413,13 +379,10 @@ def nav_confirmation(call):
     elif call.data == "confirm_back":
         handle_navigation_action(user_id, "Back")
 
-# Catch subject/department selections
 @bot.message_handler(func=lambda msg: msg.text in CACHE['entrance_subjects'] or msg.text in CACHE['exit_departments'])
 def item_selection_handler(message):
     user_id = message.from_user.id
     text = message.text
-    # Determine category from the user's navigation state to avoid
-    # ambiguity when the same name exists in both Entrance and Exit.
     state = user_states.get(user_id, {})
     menu = state.get('menu')
 
@@ -428,21 +391,18 @@ def item_selection_handler(message):
     elif menu == 'exit_departments':
         category = 'Exit'
     else:
-        # Fallback: determine by which cache contains the name
         category = "Entrance" if text in CACHE['entrance_subjects'] else "Exit"
 
-    # Pick the item_code from the appropriate cache according to the resolved category
     if category == 'Entrance':
         item_code = CACHE['entrance_subjects'].get(text)
     else:
         item_code = CACHE['exit_departments'].get(text)
-    # If item_code couldn't be resolved for some reason, fallback to previous OR behavior
+        
     if not item_code:
         item_code = CACHE['entrance_subjects'].get(text) or CACHE['exit_departments'].get(text)
     
     user_states[user_id] = {"menu": "exam_selection", "category": category, "item_code": item_code, "item_name": text}
     
-    # Check Cache for exam lists
     cache_key = f"{category}_{item_code}"
     if cache_key not in CACHE['exam_lists']:
         try:
@@ -467,7 +427,6 @@ def item_selection_handler(message):
     markup = build_reply_keyboard(exams, cols=2, add_nav=True)
     bot.send_message(user_id, f"Select an exam type for {text}:", reply_markup=markup)
 
-# Catch Exam Type Selection
 @bot.message_handler(func=lambda msg: user_states.get(msg.from_user.id, {}).get("menu") == "exam_selection")
 def start_exam(message):
     user_id = message.from_user.id
@@ -486,7 +445,6 @@ def start_exam(message):
         bot.send_message(user_id, "Invalid exam type. Please select from the keyboard.")
         return
 
-    # Load Exam
     exam_doc_id = f"{cache_key}_{exam_type}"
     if exam_doc_id not in CACHE['exams']:
         bot.send_message(user_id, "Loading exam...")
@@ -519,46 +477,190 @@ def start_exam(message):
         "locked": False,
         "referrals": 0
     }
-    # Replace the exam-type reply keyboard with a minimal navigation keyboard
-    # containing only Back and Home so the user cannot select another exam
-    # type during an active session.
+    
     try:
         nav_only = build_reply_keyboard([], cols=2, add_nav=True)
         bot.send_message(user_id, "Starting exam... Good luck!", reply_markup=nav_only)
     except Exception:
-        # If updating the keyboard fails, proceed silently to start the exam
         pass
 
     send_question(user_id)
 
 # ==========================================
-# 8. QUIZ INTERFACE & LOGIC
+# 8. NEW FEATURE: PREMIUM WORKFLOW
+# ==========================================
+
+@bot.message_handler(commands=['premium'])
+def premium_start(message):
+    """Entry point for users to purchase premium"""
+    user_id = message.from_user.id
+    markup = build_inline_keyboard([
+        ("Entrance - 150 ETB (All Subjects)", "premcat_entrance"),
+        ("Exit - 150 ETB (Per Department)", "premcat_exit")
+    ], cols=1)
+    bot.send_message(user_id, "🌟 <b>Upgrade to Premium</b>\n\nChoose a category to upgrade:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "trigger_premium")
+def trigger_premium_callback(call):
+    """Triggered from the exam lock screen"""
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    premium_start(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("premcat_"))
+def premium_category_select(call):
+    user_id = call.from_user.id
+    cat = call.data.split("_")[1]
+
+    if cat == "entrance":
+        user_states[user_id] = {"menu": "awaiting_payment", "premium_type": "entrance", "target_code": "all"}
+        send_payment_info(user_id, "Entrance (All Subjects)")
+    else:
+        user_states[user_id] = {"menu": "premium_exit_select"}
+        departments = [(name, f"premdept_{code}") for name, code in CACHE['exit_departments'].items()]
+        markup = build_inline_keyboard(departments, cols=2)
+        bot.edit_message_text("Select the Exit Exam department you want to unlock:", user_id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("premdept_"))
+def premium_dept_select(call):
+    user_id = call.from_user.id
+    code = call.data.split("_")[1]
+    dept_name = next((name for name, c in CACHE['exit_departments'].items() if c == code), code)
+
+    user_states[user_id] = {"menu": "awaiting_payment", "premium_type": "exit", "target_code": code}
+    send_payment_info(user_id, f"Exit Exam ({dept_name})")
+
+def send_payment_info(user_id, target_name):
+    text = (f"💳 <b>Payment Details for {target_name}</b>\n\n"
+            "Amount: <b>150 ETB</b>\n"
+            "CBE Account: 1000123456789 (Your Name Here)\n"
+            "Telebirr: 0911234567\n\n"
+            "Once you have made the transfer, click the button below to upload your screenshot.")
+    markup = build_inline_keyboard([("📤 Upload Screenshot", "upload_screenshot")], cols=1)
+    bot.send_message(user_id, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "upload_screenshot")
+def upload_screenshot_prompt(call):
+    user_id = call.from_user.id
+    state = user_states.get(user_id, {})
+    if state.get("menu") != "awaiting_payment":
+        bot.answer_callback_query(call.id, "Please select a premium package first using /premium", show_alert=True)
+        return
+
+    state["menu"] = "awaiting_screenshot"
+    bot.edit_message_text("📸 Please send the screenshot image of your payment now.", user_id, call.message.message_id)
+
+@bot.message_handler(content_types=['photo'], func=lambda msg: user_states.get(msg.from_user.id, {}).get("menu") == "awaiting_screenshot")
+def receive_screenshot(message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id, {})
+    ptype = state.get("premium_type")
+    tcode = state.get("target_code")
+
+    bot.send_message(user_id, "✅ Screenshot received! We will verify your payment and notify you shortly. Please be patient.")
+
+    admin_text = f"💰 <b>New Premium Payment Request</b>\n\nUser ID: <code>{user_id}</code>\nUsername: @{message.from_user.username}\nType: {ptype.upper()}\nTarget Code: {tcode}"
+
+    # Strict 64-byte limit compliance for callbacks
+    approve_data = f"approve_{user_id}_{ptype}_{tcode}"
+    reject_data = f"reject_{user_id}"
+
+    markup = build_inline_keyboard([("✅ Approve", approve_data), ("❌ Reject", reject_data)], cols=2)
+    bot.send_photo(ADMIN_TELEGRAM_ID, message.photo[-1].file_id, caption=admin_text, reply_markup=markup)
+    
+    # Reset State safely
+    user_states[user_id]["menu"] = "main"
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_") or call.data.startswith("reject_"))
+def admin_payment_action(call):
+    if call.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+
+    parts = call.data.split("_")
+    action = parts[0]
+    target_user_id = int(parts[1])
+
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+
+    if action == "reject":
+        bot.send_message(call.message.chat.id, f"Rejected payment for user {target_user_id}.")
+        try:
+            bot.send_message(target_user_id, "❌ Your premium payment was rejected. Please contact the admin if you think this is a mistake.")
+        except Exception:
+            pass
+        return
+
+    # Process Approval
+    ptype = parts[2]
+    tcode = parts[3]
+
+    try:
+        user_ref = db.collection('users').document(str(target_user_id))
+        if ptype == "entrance":
+            user_ref.set({"premium_entrance": True}, merge=True)
+            target_name = "Entrance Exams (All Subjects)"
+        else:
+            user_ref.set({"premium_exit": firestore.ArrayUnion([tcode])}, merge=True)
+            target_name = next((name for name, c in CACHE.get('exit_departments', {}).items() if c == tcode), tcode)
+            target_name = f"Exit Exam ({target_name})"
+
+        bot.send_message(call.message.chat.id, f"Approved {ptype} premium for user {target_user_id}.")
+
+        try:
+            bot.send_message(target_user_id, f"🎉 <b>Payment Approved!</b>\n\nYour premium access for <b>{target_name}</b> has been activated. Enjoy your unlimited access!")
+
+            # Auto-unlock their active session if it matches their purchase
+            if target_user_id in active_sessions:
+                sess = active_sessions[target_user_id]
+                if sess.get('locked'):
+                    exam_id = sess.get('exam_id', '')
+                    sess_cat = exam_id.split("_")[0].lower() if "_" in exam_id else ""
+                    sess_code = exam_id.split("_")[1] if "_" in exam_id else ""
+
+                    if (ptype == "entrance" and sess_cat == "entrance") or (ptype == "exit" and sess_cat == "exit" and sess_code == tcode):
+                        sess['locked'] = False
+                        bot.send_message(target_user_id, "🔓 Your active exam session has been unlocked! You can continue answering questions.")
+
+        except Exception as e:
+            print(f"Could not notify user: {e}")
+
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Error updating database: {e}")
+
+
+# ==========================================
+# 9. QUIZ INTERFACE & LOGIC
 # ==========================================
 def send_question(user_id, edit_msg_id=None):
     session = active_sessions.get(user_id)
     if not session:
         return
-        
-    # Keep track of the last message id that displayed the question (for deletion before ads)
-    # `edit_msg_id` is the message id when we are editing the previous message.
-    # When we send a new message we will store its id below.
 
-    # Check Referral Lock: only lock if the exam/department is not unlocked for this user
     if session['current_index'] >= 25 and not session['locked']:
         exam_id = session.get('exam_id')
         try:
             user_doc = db.collection('users').document(str(user_id)).get()
             user_data = user_doc.to_dict() if user_doc.exists else {}
             unlocked = user_data.get('unlocked_exams', []) if user_data else []
-        except Exception:
-            # on error, assume locked to preserve previous behavior
-            unlocked = []
 
-        if exam_id in unlocked:
-            # exam already unlocked for this user — do not lock, continue normally
+            # --- NEW: Check Database for Premium Access ---
+            is_premium = False
+            if "_" in exam_id:
+                category = exam_id.split("_")[0].lower() 
+                item_code = exam_id.split("_")[1]
+
+                if category == "entrance" and user_data.get("premium_entrance") == True:
+                    is_premium = True
+                elif category == "exit" and item_code in user_data.get("premium_exit", []):
+                    is_premium = True
+            # --------------------------------------------
+
+        except Exception:
+            unlocked = []
+            is_premium = False
+
+        if exam_id in unlocked or is_premium:
             session['locked'] = False
         else:
-            # Lock activated
             session['locked'] = True
 
     if session['locked']:
@@ -567,7 +669,6 @@ def send_question(user_id, edit_msg_id=None):
         else:
             bot_username = BOT_USERNAME
             ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}_{session['exam_id']}"
-            # Prepare share URL and message
             share_text = (
                 "ለ Entrance እና Exit Exam ዝግጅት የሚሆን ምርጥ Bot አግኝቻለሁ!\n\n"
                 "ይህ Bot የ2015፣ 2016፣ 2017 እና 2018 ያለፉ ፈተናዎችን እንዲሁም ከ50,000 በላይ ተጨማሪ ሞዴል ጥያቄዎችን ከነሙሉ ማብራሪያቸው አጠቃልሎ የያዘ ነው።\n\n"
@@ -579,21 +680,20 @@ def send_question(user_id, edit_msg_id=None):
                     f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
                     )
 
-            # Build inline keyboard with Share url button and Check Status callback
+            # --- NEW: Added the Upgrade Premium button alongside referral buttons ---
             markup = InlineKeyboardMarkup()
             try:
                 markup.add(InlineKeyboardButton("Share", url=share_url))
-                markup.add(InlineKeyboardButton("Check Status and Continue", callback_data="check_referral"))
+                markup.add(InlineKeyboardButton("Check Status", callback_data="check_referral"))
+                markup.add(InlineKeyboardButton("🌟 Upgrade Premium", callback_data="trigger_premium"))
             except Exception:
-                # fallback to single check button
-                markup = build_inline_keyboard([("Check Status and Continue", "check_referral")], cols=1)
+                markup = build_inline_keyboard([("Check Status", "check_referral"), ("🌟 Upgrade Premium", "trigger_premium")], cols=1)
 
             if edit_msg_id:
                 bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
             else:
                 bot.send_message(user_id, text, reply_markup=markup)
 
-            # Immediately after showing lock message, display temporary session score
             try:
                 temp_correct = session.get('correct', 0)
                 temp_attempts = session.get('current_index', 0)
@@ -603,17 +703,12 @@ def send_question(user_id, edit_msg_id=None):
 
             return
         
-    # Check End of Exam
     if session['current_index'] >= len(session['questions']):
         end_exam(user_id, edit_msg_id)
         return
 
-    # Trigger Ad: after every 5 questions, only once per index
     if session['current_index'] > 0 and session['current_index'] % 5 == 0 and not session.get(f"ad_shown_{session['current_index']}"):
         session[f"ad_shown_{session['current_index']}"] = True
-
-        # Determine which message to delete: prefer edit_msg_id (when we are editing),
-        # otherwise use the session-stored last message id if present.
         last_q_msg_id = edit_msg_id or session.get('last_msg_id')
         show_advertisement(user_id, last_question_msg_id=last_q_msg_id)
         return
@@ -633,17 +728,14 @@ def send_question(user_id, edit_msg_id=None):
         ("C", "ans_c"), ("D", "ans_d")
     ], cols=2)
     
-    # Send or edit the question and record the message id in session
     try:
         if edit_msg_id:
             bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
             session['last_msg_id'] = edit_msg_id
         else:
             msg = bot.send_message(user_id, text, reply_markup=markup)
-            # store the new message id for potential future deletion when an ad is shown
             session['last_msg_id'] = msg.message_id
     except Exception:
-        # Fallback: try to send as a plain message if editing fails
         msg = bot.send_message(user_id, text, reply_markup=markup)
         session['last_msg_id'] = getattr(msg, 'message_id', None)
 
@@ -656,7 +748,7 @@ def handle_answer(call):
         bot.answer_callback_query(call.id, "Session expired.")
         return
         
-    user_ans = call.data.split('_')[1] # 'a', 'b', 'c', 'd'
+    user_ans = call.data.split('_')[1] 
     q_data = session['questions'][session['current_index']]
     correct_ans = q_data['answer'].lower()
     
@@ -702,7 +794,6 @@ def check_referral_callback(call):
         return
 
     exam_id = session.get('exam_id')
-    # Read inviter's referral counts from Firestore
     try:
         inviter_doc = db.collection('users').document(str(user_id)).get()
         inviter_data = inviter_doc.to_dict() if inviter_doc.exists else {}
@@ -712,8 +803,8 @@ def check_referral_callback(call):
     except Exception:
         count_for_exam = session.get('referrals', 0)
         unlocked = []
+        
     if count_for_exam >= 2 or exam_id in unlocked:
-        # Persist unlocked exam if not already
         if exam_id not in unlocked:
             try:
                 db.collection('users').document(str(user_id)).update({
@@ -722,10 +813,8 @@ def check_referral_callback(call):
             except Exception:
                 pass
 
-        # Unlock session locally and resume
         session['locked'] = False
         bot.answer_callback_query(call.id, "Unlocked! Resuming exam...", show_alert=True)
-        # Delete the lock message then send next question as a new message (resume at Q26)
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
@@ -745,7 +834,6 @@ def skip_ad_callback(call):
         return
 
     ad_ctx = session.pop('ad_context', {}) if session else {}
-    # Delete countdown message and copied ad (if any)
     try:
         if ad_ctx.get('countdown_msg_id'):
             try:
@@ -760,32 +848,18 @@ def skip_ad_callback(call):
     except Exception:
         pass
 
-    # Resume exam by sending the next question (do not pass edit_msg_id so it sends new message)
     send_question(user_id)
     bot.answer_callback_query(call.id)
 
 def show_advertisement(user_id, last_question_msg_id=None):
-    """
-    Show advertisement with a 5-second countdown.
-
-    Behavior:
-    - Delete the question message identified by `last_question_msg_id` (only that message).
-    - Copy the saved ad message (if any) to the user.
-    - Send a separate countdown message (5..1) that will be updated every second.
-    - After countdown finishes, edit the countdown message to include a "Skip" button.
-    - The skip handler will delete the ad messages and resume the exam by sending the next question.
-    """
-    # Delete the previous question message (only the one immediately before the ad)
     if last_question_msg_id:
         try:
             bot.delete_message(user_id, last_question_msg_id)
         except Exception:
-            # ignore deletion errors (message may already be gone)
             pass
 
     ad = CACHE.get('ad_data')
     ad_copy_msg_id = None
-    # Copy ad media/text if available
     if ad and ad.get('message_id') and ad.get('chat_id'):
         try:
             copied = bot.copy_message(user_id, ad['chat_id'], ad['message_id'])
@@ -793,7 +867,6 @@ def show_advertisement(user_id, last_question_msg_id=None):
         except Exception as e:
             print(f"Failed to copy ad message: {e}")
 
-    # Send countdown message and update it every second
     try:
         countdown_text = "⏳ Advertisement — resuming in 5s"
         countdown_msg = bot.send_message(user_id, countdown_text)
@@ -802,7 +875,6 @@ def show_advertisement(user_id, last_question_msg_id=None):
         print(f"Failed to send countdown message: {e}")
         return
 
-    # Store ad context in the user's session so the skip handler can access it
     session = active_sessions.get(user_id)
     if session is not None:
         session['ad_context'] = {
@@ -811,27 +883,22 @@ def show_advertisement(user_id, last_question_msg_id=None):
         }
     
     def run_countdown(chat_id, message_id):
-        # wait 5 seconds without spamming edits
         time.sleep(5)
-    
         try:
             final_text = "⏳ Advertisement — you can skip it now"
             markup = build_inline_keyboard(
                 [("Skip", "skip_ad")],
                 cols=1
             )
-    
             bot.edit_message_text(
                 final_text,
                 chat_id,
                 message_id,
                 reply_markup=markup
             )
-    
         except Exception as e:
             print(e)
 
-    # Run countdown in a background thread so we don't block the bot
     threading.Thread(target=run_countdown, args=(user_id, countdown_msg_id), daemon=True).start()
 
 def save_session_progress(user_id):
@@ -861,7 +928,7 @@ def end_exam(user_id, msg_id):
     handle_navigation_action(user_id, "Home")
 
 # ==========================================
-# 9. ADMIN PANEL & COMMANDS
+# 10. ADMIN PANEL & COMMANDS
 # ==========================================
 @bot.message_handler(commands=['ethioegzam'])
 def admin_panel(message):
@@ -917,14 +984,12 @@ def admin_callbacks(call):
         markup = build_inline_keyboard([(status, "toggle_maintenance")], cols=1)
         bot.send_message(call.from_user.id, f"Maintenance Mode is currently {'ON' if MAINTENANCE_MODE else 'OFF'}", reply_markup=markup)
 
-# Admin: Add Field Logic
 def process_add_field(message):
     if message.text == "/cancel":
         bot.send_message(message.from_user.id, "Operation cancelled.")
         return
         
     try:
-        # Assuming admin uploads JSON as a file or sends raw text
         if message.document:
             file_info = bot.get_file(message.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
@@ -932,24 +997,21 @@ def process_add_field(message):
         else:
             data = json.loads(message.text)
             
-        # Parse Entrance
         if 'entrance' in data and 'subjects' in data['entrance']:
             for sub in data['entrance']['subjects']:
                 code = sub.get('code', sub['name'].lower().replace(' ', '_'))
                 db.collection('exam').document('entrance').collection('subjects').document(code).set(sub)
                 
-        # Parse Exit
         if 'exit' in data and 'departments' in data['exit']:
             for dept in data['exit']['departments']:
                 code = dept.get('code', dept['name'].lower().replace(' ', '_'))
                 db.collection('exam').document('exit').collection('departments').document(code).set(dept)
                 
         bot.send_message(message.from_user.id, "Fields successfully added.")
-        load_cache() # Reload
+        load_cache() 
     except Exception as e:
         bot.send_message(message.from_user.id, f"Error processing JSON: {e}")
 
-# Admin: Add Quiz Logic
 @bot.callback_query_handler(func=lambda call: call.data.startswith("quizcat_"))
 def admin_quiz_category(call):
     cat = call.data.split("_")[1]
@@ -994,14 +1056,12 @@ def process_quiz_upload(message, cat, code, type_name):
             db.collection('exam').document('exit').collection('departments').document(code).collection('exams').add(doc_data)
             
         bot.send_message(message.from_user.id, "Quiz successfully uploaded and saved.")
-        # Clear specific exam list cache to force reload
         cache_key = f"{cat.capitalize()}_{code}"
         if cache_key in CACHE['exam_lists']:
             del CACHE['exam_lists'][cache_key]
     except Exception as e:
         bot.send_message(message.from_user.id, f"Error saving quiz: {e}")
 
-# Admin: Add Ad
 def process_add_ad(message):
     try:
         chat_id = message.chat.id
@@ -1015,7 +1075,6 @@ def process_add_ad(message):
     except Exception as e:
         bot.send_message(message.from_user.id, f"Error saving Ad: {e}")
 
-# Admin: Clear Cache & Maintenance
 @bot.callback_query_handler(func=lambda call: call.data in ["cache_yes", "cache_cancel", "toggle_maintenance"])
 def admin_misc_callbacks(call):
     if call.data == "cache_cancel":
@@ -1036,19 +1095,16 @@ def admin_misc_callbacks(call):
         status = "ON" if MAINTENANCE_MODE else "OFF"
         bot.edit_message_text(f"Maintenance mode is now {status}.", call.from_user.id, call.message.message_id)
 
-# Admin: Broadcast
 def process_broadcast(message):
     bot.send_message(message.from_user.id, "Starting broadcast...")
     success = 0
     try:
-        # Convert stream to list to avoid gRPC streaming issues
         users = list(db.collection('users').stream())
         for user_doc in users:
             uid = int(user_doc.id)
             if uid == ADMIN_TELEGRAM_ID:
                 continue
             
-            # If user has active session, queue it
             if uid in active_sessions:
                 if uid not in queued_broadcasts:
                     queued_broadcasts[uid] = []
@@ -1065,14 +1121,13 @@ def process_broadcast(message):
         bot.send_message(message.from_user.id, f"Broadcast error: {e}")
 
 # ==========================================
-# 10. BACKGROUND TASKS (SESSION EXPIRY & QUEUE)
+# 11. BACKGROUND TASKS (SESSION EXPIRY & QUEUE)
 # ==========================================
 def background_worker():
     while True:
         now = datetime.now()
         expired_users = []
         
-        # Check sessions
         for uid, session in list(active_sessions.items()):
             if now - session['last_activity'] > timedelta(hours=4):
                 expired_users.append(uid)
@@ -1083,7 +1138,6 @@ def background_worker():
                 del active_sessions[uid]
                 bot.send_message(uid, "Your exam session has expired due to 4 hour of inactivity.")
                 
-                # Send queued broadcasts
                 if uid in queued_broadcasts:
                     for msg in queued_broadcasts[uid]:
                         bot.copy_message(uid, msg['chat_id'], msg['message_id'])
@@ -1091,19 +1145,14 @@ def background_worker():
             except Exception:
                 pass
                 
-        time.sleep(60) # Check every minute
+        time.sleep(60) 
 
 # ==========================================
-# 11. ENTRY POINT
+# 12. ENTRY POINT
 # ==========================================
 if __name__ == '__main__':
-    # Initial Cache Load
     load_cache()
-    
-    # Start Flask keep-alive
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Start Background worker
     threading.Thread(target=background_worker, daemon=True).start()
     
     print("Bot is polling...")
