@@ -532,8 +532,8 @@ def premium_dept_select(call):
 def send_payment_info(user_id, target_name):
     text = (f"💳 <b>Payment Details for {target_name}</b>\n\n"
             "Amount: <b>150 ETB</b>\n"
-            "CBE Account: 1000123456789 (Your Name Here)\n"
-            "Telebirr: 0911234567\n\n"
+            "CBE Account: 1000649561382 (Jemal Hussen Hassen)\n"
+            "Telebirr: 0906365418\n\n"
             "Once you have made the transfer, click the button below to upload your screenshot.")
     markup = build_inline_keyboard([("📤 Upload Screenshot", "upload_screenshot")], cols=1)
     bot.send_message(user_id, text, reply_markup=markup)
