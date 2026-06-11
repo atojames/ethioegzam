@@ -680,14 +680,13 @@ def send_question(user_id, edit_msg_id=None):
                     f"Invite 2 users to unlock the next step. \n\nUse the Share button to send the bot to your class group:\n\n"
                     )
 
-            # --- NEW: Added the Upgrade Premium button alongside referral buttons ---
+            # --- UI: temporarily hide the Upgrade Premium button (backend unchanged) ---
             markup = InlineKeyboardMarkup()
             try:
                 markup.add(InlineKeyboardButton("Share", url=share_url))
                 markup.add(InlineKeyboardButton("Check Status", callback_data="check_referral"))
-                markup.add(InlineKeyboardButton("🌟 Upgrade Premium", callback_data="trigger_premium"))
             except Exception:
-                markup = build_inline_keyboard([("Check Status", "check_referral"), ("🌟 Upgrade Premium", "trigger_premium")], cols=1)
+                markup = build_inline_keyboard([("Check Status", "check_referral")], cols=1)
 
             if edit_msg_id:
                 bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
