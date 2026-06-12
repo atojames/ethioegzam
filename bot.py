@@ -257,7 +257,7 @@ def send_welcome(message):
                     count_for_exam = referrals_map.get(exam_id, 0)
                     unlocked = inviter_data.get('unlocked_exams', []) if inviter_data else []
 
-                    if count_for_exam >= 2 and exam_id not in unlocked:
+                    if count_for_exam >= 4 and exam_id not in unlocked:
                         try:
                             db.collection('users').document(str(ref_user_id)).update({
                                 'unlocked_exams': firestore.ArrayUnion([exam_id])
@@ -708,7 +708,7 @@ def send_question(user_id, edit_msg_id=None):
             session['locked'] = True
 
     if session['locked']:
-        if session['referrals'] >= 2:
+        if session['referrals'] >= 4:
             session['locked'] = False
         else:
             bot_username = BOT_USERNAME
@@ -889,9 +889,9 @@ def check_referral_callback(call):
         unlocked = []
         
     # Check if they have enough referrals, previously unlocked it, OR have premium
-    if count_for_exam >= 2 or exam_id in unlocked or is_premium:
+    if count_for_exam >= 4 or exam_id in unlocked or is_premium:
         
-        if count_for_exam >= 2 and exam_id not in unlocked:
+        if count_for_exam >= 4 and exam_id not in unlocked:
             try:
                 db.collection('users').document(str(user_id)).update({
                     'unlocked_exams': firestore.ArrayUnion([exam_id])
@@ -907,7 +907,7 @@ def check_referral_callback(call):
             pass
         send_question(user_id)
     else:
-        remaining = max(0, 2 - count_for_exam)
+        remaining = max(0, 4 - count_for_exam)
         bot.answer_callback_query(call.id, f"You need {remaining} more users to join, or upgrade to Premium.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "skip_ad")
@@ -947,11 +947,11 @@ def show_advertisement(user_id, last_question_msg_id=None):
     ad_copy_msg_id = None
     
     if ads:
-        # Get the user's current question index to determine which ad to show
+
         session = active_sessions.get(user_id, {})
         current_index = session.get('current_index', 0)
         
-        # Math trick to rotate ads: (Q5 = index 0, Q10 = index 1, etc.)
+
         rotation_index = ((current_index // 5) - 1) % len(ads)
         ad = ads[rotation_index]
         
