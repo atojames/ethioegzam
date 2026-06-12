@@ -50,7 +50,7 @@ CACHE = {
     'exit_departments': {},  # {name: code}
     'exams': {},             # {exam_id: questions_list}
     'exam_lists': {},        # {category_subject: [exam_types]}
-    'ad_data': None,         # {"chat_id": admin_id, "message_id": msg_id}
+    'ads': [],        
     'total_users': 0
 }
 
@@ -79,10 +79,19 @@ def load_cache():
     """Initial cache load from Firestore"""
     global CACHE
     try:
-        # Load Ad
+        # --- NEW AD LOADING LOGIC ---
         ad_doc = db.collection('settings').document('advertisement').get()
         if ad_doc.exists:
-            CACHE['ad_data'] = ad_doc.to_dict()
+            data = ad_doc.to_dict()
+            if 'ads' in data:
+                # Load the new array format
+                CACHE['ads'] = data['ads']
+            elif 'message_id' in data: 
+                # Backward compatibility: Convert the old single ad into a list
+                CACHE['ads'] = [{"chat_id": data['chat_id'], "message_id": data['message_id']}]
+            else:
+                CACHE['ads'] = []
+        # -----------------------------
         
         # Load Entrance
         ent_ref = db.collection('exam').document('entrance').collection('subjects').stream()
@@ -934,14 +943,24 @@ def show_advertisement(user_id, last_question_msg_id=None):
         except Exception:
             pass
 
-    ad = CACHE.get('ad_data')
+    ads = CACHE.get('ads', [])
     ad_copy_msg_id = None
-    if ad and ad.get('message_id') and ad.get('chat_id'):
-        try:
-            copied = bot.copy_message(user_id, ad['chat_id'], ad['message_id'])
-            ad_copy_msg_id = getattr(copied, 'message_id', None)
-        except Exception as e:
-            print(f"Failed to copy ad message: {e}")
+    
+    if ads:
+        # Get the user's current question index to determine which ad to show
+        session = active_sessions.get(user_id, {})
+        current_index = session.get('current_index', 0)
+        
+        # Math trick to rotate ads: (Q5 = index 0, Q10 = index 1, etc.)
+        rotation_index = ((current_index // 5) - 1) % len(ads)
+        ad = ads[rotation_index]
+        
+        if ad.get('message_id') and ad.get('chat_id'):
+            try:
+                copied = bot.copy_message(user_id, ad['chat_id'], ad['message_id'])
+                ad_copy_msg_id = getattr(copied, 'message_id', None)
+            except Exception as e:
+                print(f"Failed to copy ad message: {e}")
 
     try:
         countdown_text = "⏳ Advertisement — resuming in 5s"
@@ -1140,14 +1159,19 @@ def process_quiz_upload(message, cat, code, type_name):
 
 def process_add_ad(message):
     try:
-        chat_id = message.chat.id
-        msg_id = message.message_id
-        ad_data = {"chat_id": chat_id, "message_id": msg_id}
+        new_ad = {"chat_id": message.chat.id, "message_id": message.message_id}
         
-        db.collection('settings').document('advertisement').set(ad_data)
-        CACHE['ad_data'] = ad_data
+        # 1. Append to Firestore using ArrayUnion
+        db.collection('settings').document('advertisement').set({
+            "ads": firestore.ArrayUnion([new_ad])
+        }, merge=True)
         
-        bot.send_message(message.from_user.id, "Advertisement saved successfully.")
+        # 2. Update local cache immediately
+        if 'ads' not in CACHE:
+            CACHE['ads'] = []
+        CACHE['ads'].append(new_ad)
+        
+        bot.send_message(message.from_user.id, f"✅ Advertisement added successfully!\nTotal ads in rotation: {len(CACHE['ads'])}")
     except Exception as e:
         bot.send_message(message.from_user.id, f"Error saving Ad: {e}")
 
