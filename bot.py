@@ -826,23 +826,63 @@ def next_question_callback(call):
 def check_referral_callback(call):
     user_id = call.from_user.id
     session = active_sessions.get(user_id)
+    
+    # ==========================================
+    # NEW: Smart Fallback for Expired Sessions
+    # ==========================================
     if not session:
-        bot.answer_callback_query(call.id, "Session expired.")
+        try:
+            # Clean up the old, dead locked message so the user doesn't get stuck clicking it
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+            
+        # Check their global premium status
+        try:
+            user_doc = db.collection('users').document(str(user_id)).get()
+            user_data = user_doc.to_dict() if user_doc.exists else {}
+            is_premium = user_data.get("premium_entrance") == True or len(user_data.get("premium_exit", [])) > 0
+            
+            if is_premium:
+                bot.answer_callback_query(call.id, "🌟 Your Premium is ACTIVE! Please start your exam.", show_alert=True)
+            else:
+                bot.answer_callback_query(call.id, "⏳ This exam session expired due to inactivity. Please start a new one.", show_alert=True)
+        except Exception:
+            bot.answer_callback_query(call.id, "Session expired. Please start a new exam.", show_alert=True)
+        
+        # Bring them back to the main menu instantly
+        show_main_menu(user_id)
         return
+    # ==========================================
 
     exam_id = session.get('exam_id')
+    is_premium = False 
+    
     try:
         inviter_doc = db.collection('users').document(str(user_id)).get()
         inviter_data = inviter_doc.to_dict() if inviter_doc.exists else {}
         referrals_map = inviter_data.get('referrals_map', {}) if inviter_data else {}
         count_for_exam = referrals_map.get(exam_id, 0)
         unlocked = inviter_data.get('unlocked_exams', []) if inviter_data else []
+        
+        # Check Database for Premium Access 
+        if "_" in exam_id:
+            category = exam_id.split("_")[0].lower() 
+            item_code = exam_id.split("_")[1]
+
+            if category == "entrance" and inviter_data.get("premium_entrance") == True:
+                is_premium = True
+            elif category == "exit" and item_code in inviter_data.get("premium_exit", []):
+                is_premium = True
+        
     except Exception:
         count_for_exam = session.get('referrals', 0)
         unlocked = []
         
-    if count_for_exam >= 2 or exam_id in unlocked:
-        if exam_id not in unlocked:
+    # Check if they have enough referrals, previously unlocked it, OR have premium
+    if count_for_exam >= 2 or exam_id in unlocked or is_premium:
+        
+        if count_for_exam >= 2 and exam_id not in unlocked:
             try:
                 db.collection('users').document(str(user_id)).update({
                     'unlocked_exams': firestore.ArrayUnion([exam_id])
@@ -859,8 +899,7 @@ def check_referral_callback(call):
         send_question(user_id)
     else:
         remaining = max(0, 2 - count_for_exam)
-        bot.answer_callback_query(call.id, f"You need {remaining} more users to join.", show_alert=True)
-
+        bot.answer_callback_query(call.id, f"You need {remaining} more users to join, or upgrade to Premium.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "skip_ad")
 def skip_ad_callback(call):
