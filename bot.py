@@ -679,61 +679,69 @@ def send_question(user_id, edit_msg_id=None):
     if not session:
         return
 
-    if session['current_index'] >= 25 and not session['locked']:
+
+    if session['current_index'] >= 3 and not session['locked']:
         exam_id = session.get('exam_id')
+        category = exam_id.split("_")[0].lower() if "_" in exam_id else ""
+        
         try:
             user_doc = db.collection('users').document(str(user_id)).get()
             user_data = user_doc.to_dict() if user_doc.exists else {}
             unlocked = user_data.get('unlocked_exams', []) if user_data else []
 
-            # --- NEW: Check Database for Premium Access ---
             is_premium = False
             if "_" in exam_id:
-                category = exam_id.split("_")[0].lower() 
                 item_code = exam_id.split("_")[1]
-
                 if category == "entrance" and user_data.get("premium_entrance") == True:
                     is_premium = True
                 elif category == "exit" and item_code in user_data.get("premium_exit", []):
                     is_premium = True
-            # --------------------------------------------
-
         except Exception:
             unlocked = []
             is_premium = False
 
-        if exam_id in unlocked or is_premium:
-            session['locked'] = False
+        # RUTHLESS PAYWALL: Exit exams ignore referrals entirely. Premium ONLY.
+        if category == "exit":
+            if is_premium:
+                session['locked'] = False
+            else:
+                session['locked'] = True
+                session['lock_reason'] = 'premium_only' # Tag it so we can show a strict message
         else:
-            session['locked'] = True
+            # Entrance exams still use referrals or premium
+            if exam_id in unlocked or is_premium:
+                session['locked'] = False
+            else:
+                session['locked'] = True
+                session['lock_reason'] = 'referrals'
 
     if session['locked']:
-        if session['referrals'] >= 4:
-            session['locked'] = False
-        else:
-            bot_username = BOT_USERNAME
-            ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}_{session['exam_id']}"
-            share_text = (
-                "ለ Entrance እና Exit Exam ዝግጅት የሚሆን ምርጥ Bot አግኝቻለሁ!\n\n"
-                "ይህ Bot የ2015፣ 2016፣ 2017 እና 2018 ያለፉ ፈተናዎችን እንዲሁም ከ50,000 በላይ ተጨማሪ ሞዴል ጥያቄዎችን ከነሙሉ ማብራሪያቸው አጠቃልሎ የያዘ ነው።\n\n"
-                f"{ref_link}"
-            )
-            share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
-
-            text = (
-            f"🔒 <b>Exam Locked!</b>\n\n"
-            f"You've completed the free 25 questions.\n\n"
-            f"👉 Invite 2 users to unlock more questions for free.\n"
-            f"👉 Or send /premium for instant access to all exam categories.\n\n"
-            f"Share the bot with your friends or upgrade to Premium to continue."
-            )
-          
-            markup = InlineKeyboardMarkup()
-            try:
+            if session.get('lock_reason') == 'premium_only':
+                # EXIT EXAM STRICT PAYWALL
+                text = (
+                    "🚨 <b>FREE ACCESS CLOSED</b> 🚨\n\n"
+                    "Due to extreme server load from 3,600+ students, free access to Exit Exams and past unlocked exams is now restricted.\n\n"
+                    "To continue practicing, you MUST upgrade to Premium.\n\n"
+                    "Secure your Exit Exam for just 150 ETB before slots are full. Send /premium to proceed."
+                )
+                # Hide inline upgrade button in-chat; backend handlers remain available via /premium
+                markup = None
+            else:
+                # ENTRANCE EXAM REFERRAL WALL
+                bot_username = BOT_USERNAME
+                ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}_{session['exam_id']}"
+                share_text = f"ለ Entrance ዝግጅት የሚሆን ምርጥ Bot አግኝቻለሁ! {ref_link}"
+                share_url = f"https://t.me/share/url?text={quote_plus(share_text)}"
+                
+                text = (
+                    "🔒 <b>Exam Locked!</b>\n\n"
+                    "You've completed the free questions.\n"
+                    "👉 Invite 4 users (UPDATED) to unlock more questions.\n"
+                    "👉 Or send /premium for instant access."
+                )
+                markup = InlineKeyboardMarkup()
                 markup.add(InlineKeyboardButton("Share", url=share_url))
                 markup.add(InlineKeyboardButton("Check Status", callback_data="check_referral"))
-            except Exception:
-                markup = build_inline_keyboard([("Check Status", "check_referral")], cols=1)
 
             if edit_msg_id:
                 bot.edit_message_text(text, user_id, edit_msg_id, reply_markup=markup)
@@ -747,8 +755,9 @@ def send_question(user_id, edit_msg_id=None):
             except Exception:
                 pass
 
-            return
-        
+            return 
+
+
     if session['current_index'] >= len(session['questions']):
         end_exam(user_id, edit_msg_id)
         return
