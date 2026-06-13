@@ -528,8 +528,33 @@ def premium_start(message):
 @bot.callback_query_handler(func=lambda call: call.data == "trigger_premium")
 def trigger_premium_callback(call):
     """Triggered from the exam lock screen"""
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    premium_start(call.message)
+    # Acknowledge the callback so the client stops showing a loading state
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
+    # Remove the locked message if possible
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+    # Call the premium flow using the callback object so `premium_start`
+    # reads `from_user` from the callback (the clicker), not from the bot's message.
+    try:
+        premium_start(call)
+    except Exception:
+        # Fallback: send the premium menu directly to the user id
+        try:
+            user_id = call.from_user.id
+            markup = build_inline_keyboard([
+                ("Entrance - 150 ETB ", "premcat_entrance"),
+                ("Exit - 150 ETB ", "premcat_exit")
+            ], cols=1)
+            bot.send_message(user_id, "🌟 <b>Upgrade to Premium</b>\n\nChoose a category to upgrade:", reply_markup=markup)
+        except Exception:
+            pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("premcat_"))
 def premium_category_select(call):
@@ -554,6 +579,12 @@ def premium_dept_select(call):
     user_id = call.from_user.id
     code = call.data.split("_")[1]
     dept_name = next((name for name, c in CACHE['exit_departments'].items() if c == code), code)
+
+    # Remove the department selection menu message first, then send payment info
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
 
     user_states[user_id] = {"menu": "awaiting_payment", "premium_type": "exit", "target_code": code}
     send_payment_info(user_id, f"Exit Exam ({dept_name})")
@@ -650,7 +681,7 @@ def admin_payment_action(call):
         bot.send_message(call.message.chat.id, f"Approved {ptype} premium for user {target_user_id}.")
 
         try:
-            bot.send_message(target_user_id, f"🎉 <b>Payment Approved!</b>\n\nYour premium access for <b>{target_name}</b> has been activated. Enjoy your unlimited access!")
+            bot.send_message(target_user_id, f"🎉 <b>Payment Approved!</b>\n\nYour premium access for <b>{target_name}</b> has been activated. Enjoy your unlimited access!\n\nTo get started, send /start.")
 
             # Auto-unlock their active session if it matches their purchase
             if target_user_id in active_sessions:
@@ -680,7 +711,7 @@ def send_question(user_id, edit_msg_id=None):
         return
 
 
-    if session['current_index'] >= 3 and not session['locked']:
+    if session['current_index'] >= 25 and not session['locked']:
         exam_id = session.get('exam_id')
         category = exam_id.split("_")[0].lower() if "_" in exam_id else ""
         
@@ -719,13 +750,13 @@ def send_question(user_id, edit_msg_id=None):
             if session.get('lock_reason') == 'premium_only':
                 # EXIT EXAM STRICT PAYWALL
                 text = (
-                    "🚨 <b>FREE ACCESS CLOSED</b> 🚨\n\n"
-                    "Due to extreme server load from 3,600+ students, free access to Exit Exams and past unlocked exams is now restricted.\n\n"
+                    " <b>FREE ACCESS CLOSED</b> \n\n"
+                    "Due to heavy server traffic, free access to Exit Exams and previously unlocked exams has been restricted.\n\n"
                     "To continue practicing, you MUST upgrade to Premium.\n\n"
-                    "Secure your Exit Exam for just 150 ETB before slots are full. Send /premium to proceed."
+                    "Secure your Exit Exam for just 150 ETB before slots are full. Send /premium or click the button below"
+
                 )
-                # Hide inline upgrade button in-chat; backend handlers remain available via /premium
-                markup = None
+                markup = build_inline_keyboard([("Upgrade to Premium", "trigger_premium")], cols=1)
             else:
                 # ENTRANCE EXAM REFERRAL WALL
                 bot_username = BOT_USERNAME
